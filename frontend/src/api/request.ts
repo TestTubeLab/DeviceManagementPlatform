@@ -4,7 +4,7 @@ import router from '@/router'
 
 const request = axios.create({
   baseURL: '/api',
-  timeout: 30000,
+  timeout: 600000,  // 10分钟，大文件上传需要更长时间
 })
 
 // 请求拦截器 - 添加 Token
