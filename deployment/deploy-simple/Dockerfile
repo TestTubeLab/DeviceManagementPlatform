@@ -48,6 +48,9 @@ COPY --from=backend-builder /usr/local/bin /usr/local/bin
 # 复制后端代码
 COPY server/ /app/
 
+# 复制 device-agent 脚本（供下载）
+COPY device-agent/ /app/device-agent/
+
 # 复制前端构建产物
 COPY --from=frontend-builder /app/dist /usr/share/nginx/html
 

@@ -805,8 +805,10 @@ def get_install_script(request):
     GET /api/install.sh
     使用方法: curl -fsSL http://your-server:8081/api/install.sh | sudo bash
     """
-    # 获取服务器地址
+    # 获取服务器地址（确保包含端口号）
     host = request.get_host()
+    if ':' not in host:
+        host = f"{host}:8081"
     server_url = f"http://{host}/api"
     
     # 完整的bash安装脚本
@@ -949,7 +951,24 @@ def get_agent_script(request):
     from django.conf import settings
     
     # 读取完整的device-agent.py文件
-    agent_path = os.path.join(settings.BASE_DIR, '..', 'device-agent', 'device-agent.py')
+    # 在Docker容器中路径是 /app/device-agent/device-agent.py
+    # 在本地开发环境中路径是 ../device-agent/device-agent.py
+    possible_paths = [
+        os.path.join(settings.BASE_DIR, 'device-agent', 'device-agent.py'),  # Docker: /app/device-agent/
+        os.path.join(settings.BASE_DIR, '..', 'device-agent', 'device-agent.py'),  # 本地开发
+    ]
+    
+    agent_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            agent_path = path
+            break
+    
+    if not agent_path:
+        return Response(
+            {"error": "Agent script not found", "searched_paths": possible_paths},
+            status=status.HTTP_404_NOT_FOUND
+        )
     
     try:
         with open(agent_path, 'r', encoding='utf-8') as f:
@@ -957,11 +976,14 @@ def get_agent_script(request):
         
         # 动态替换CLOUD_SERVER地址
         host = request.get_host()
+        # 确保包含端口号
+        if ':' not in host:
+            host = f"{host}:8081"
         server_url = f"http://{host}/api"
         
         # 替换默认的CLOUD_SERVER值
         agent_script = agent_script.replace(
-            'CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://localhost:8000/api")',
+            'CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")',
             f'CLOUD_SERVER = os.getenv("CLOUD_SERVER", "{server_url}")'
         )
         
