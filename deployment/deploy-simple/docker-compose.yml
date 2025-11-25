@@ -17,17 +17,32 @@ services:
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
       - ALLOWED_HOSTS=*
       - SERVER_URL=${SERVER_URL:-http://localhost:8081}
+      - DOCKER_REGISTRY_URL=registry:5000
     volumes:
       - app_data:/app/data
       - app_media:/app/media
+      - /var/run/docker.sock:/var/run/docker.sock  # 挂载Docker socket
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/api/devices/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+    depends_on:
+      - registry
+
+  # Docker Registry - 存储镜像
+  registry:
+    image: registry:2
+    container_name: device-registry
+    ports:
+      - "5000:5000"
+    volumes:
+      - registry_data:/var/lib/registry
+    restart: unless-stopped
 
 volumes:
   app_data:
   app_media:
+  registry_data:
 

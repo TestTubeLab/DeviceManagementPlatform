@@ -25,11 +25,19 @@ FROM python:3.10-slim
 LABEL maintainer="Yanxicoder"
 LABEL description="Device Management Platform - All-in-One"
 
-# 使用阿里云Debian镜像加速
+# 使用阿里云Debian镜像加速，安装必要工具
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true && \
     apt-get update && apt-get install -y \
     nginx \
     curl \
+    ca-certificates \
+    gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
