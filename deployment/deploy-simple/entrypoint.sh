@@ -48,7 +48,9 @@ exec gunicorn core.wsgi:application \
     --bind 127.0.0.1:8000 \
     --workers 2 \
     --threads 4 \
-    --timeout 300 \
+    --timeout 600 \
+    --graceful-timeout 600 \
+    --keep-alive 5 \
     --access-logfile - \
     --error-logfile -
 
