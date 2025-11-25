@@ -47,17 +47,9 @@
             <el-icon><Monitor /></el-icon>
             <span>设备管理</span>
           </el-menu-item>
-          <el-menu-item index="/images">
-            <el-icon><Box /></el-icon>
-            <span>镜像仓库</span>
-          </el-menu-item>
           <el-menu-item index="/projects">
             <el-icon><FolderOpened /></el-icon>
             <span>项目管理</span>
-          </el-menu-item>
-          <el-menu-item index="/deploy">
-            <el-icon><Upload /></el-icon>
-            <span>部署中心</span>
           </el-menu-item>
           <el-menu-item index="/tasks">
             <el-icon><List /></el-icon>
@@ -134,7 +126,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Monitor, DataLine, Upload, List, Bell, User, Box, FolderOpened, SwitchButton } from '@element-plus/icons-vue'
+import { Monitor, DataLine, List, Bell, User, FolderOpened, SwitchButton } from '@element-plus/icons-vue'
 import { useTaskStore } from '@/stores/task'
 import { logout, getStoredUser, clearAuth } from '@/api/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
