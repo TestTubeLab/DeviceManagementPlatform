@@ -25,20 +25,19 @@ FROM python:3.10-slim
 LABEL maintainer="Yanxicoder"
 LABEL description="Device Management Platform - All-in-One"
 
-# 使用阿里云Debian镜像加速，安装必要工具
+# 使用阿里云镜像加速，安装必要工具和Docker CLI
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true && \
     apt-get update && apt-get install -y \
     nginx \
     curl \
     ca-certificates \
-    gnupg \
-    && install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
-    && chmod a+r /etc/apt/keyrings/docker.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
-    && apt-get update \
-    && apt-get install -y docker-ce-cli \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # 直接下载 Docker CLI 静态二进制文件
+    && curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/static/stable/x86_64/docker-24.0.7.tgz -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz -C /tmp \
+    && mv /tmp/docker/docker /usr/local/bin/ \
+    && rm -rf /tmp/docker /tmp/docker.tgz \
+    && chmod +x /usr/local/bin/docker
 
 WORKDIR /app
 
