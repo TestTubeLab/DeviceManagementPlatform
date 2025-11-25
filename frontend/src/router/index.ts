@@ -3,6 +3,12 @@ import MainLayout from '@/layouts/MainLayout.vue'
 
 const routes: RouteRecordRaw[] = [
   {
+    path: '/login',
+    name: 'Login',
+    component: () => import('@/views/Login.vue'),
+    meta: { title: '登录', public: true }
+  },
+  {
     path: '/',
     component: MainLayout,
     redirect: '/dashboard',
@@ -56,6 +62,22 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(),
   routes
+})
+
+// 路由守卫 - 检查登录状态
+router.beforeEach((to, _from, next) => {
+  const token = localStorage.getItem('token')
+  const isPublic = to.meta.public === true
+  
+  if (!token && !isPublic) {
+    // 未登录且不是公开页面，跳转登录
+    next('/login')
+  } else if (token && to.path === '/login') {
+    // 已登录但访问登录页，跳转首页
+    next('/')
+  } else {
+    next()
+  }
 })
 
 export default router

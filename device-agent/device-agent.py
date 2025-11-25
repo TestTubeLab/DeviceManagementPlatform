@@ -864,7 +864,7 @@ def main():
             # 定时发送心跳
             if current_time - last_heartbeat >= HEARTBEAT_INTERVAL:
                 logger.debug("发送心跳...")
-                command = send_heartbeat()
+            command = send_heartbeat()
                 last_heartbeat = current_time
                 
                 # 处理心跳返回的命令
@@ -872,7 +872,7 @@ def main():
                     task_id = command.get("task_id")
                     version = command.get("version")
                     logger.info(f"收到更新命令: 版本 {version}")
-                    execute_update(task_id, version)
+                execute_update(task_id, version)
             
             # 定时轮询部署任务
             if current_time - last_task_poll >= TASK_POLL_INTERVAL:

@@ -19,5 +19,9 @@ urlpatterns = [
     path('', include(router.urls)),
     path('install.sh', views.get_install_script, name='install_script'),
     path('agent/device-agent.py', views.get_agent_script, name='agent_script'),
+    # 用户认证
+    path('auth/login/', views.user_login, name='user_login'),
+    path('auth/logout/', views.user_logout, name='user_logout'),
+    path('auth/user/', views.user_info, name='user_info'),
 ]
 

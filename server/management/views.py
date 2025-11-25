@@ -7,11 +7,13 @@ import json
 from django.conf import settings
 from django.utils import timezone
 from django.http import HttpResponse
+from django.contrib.auth import authenticate
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.authtoken.models import Token
 from .models import (
     Device, DeploymentTask, UpdateTask, DeviceLog, DockerImage,
     CodePackage, Project, ProjectConfig, ProjectDeployment
@@ -29,7 +31,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
     serializer_class = DeviceSerializer
     lookup_field = 'device_id'
     
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
     def register(self, request):
         """
         设备注册接口
@@ -97,10 +99,10 @@ class DeviceViewSet(viewsets.ModelViewSet):
             "auto_deploy_project": device.auto_deploy_project.name if device.auto_deploy_project else None
         })
     
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
     def heartbeat(self, request, device_id=None):
         """
-        设备心跳接口
+        设备心跳接口（Agent调用，不需要认证）
         POST /api/devices/{device_id}/heartbeat/
         Body: {
             "version": "v1.0.3",
@@ -155,10 +157,10 @@ class DeviceViewSet(viewsets.ModelViewSet):
         
         return Response(response_data)
     
-    @action(detail=True, methods=['get'])
+    @action(detail=True, methods=['get'], permission_classes=[AllowAny])
     def deployment(self, request, device_id=None):
         """
-        获取部署指令
+        获取部署指令（Agent调用，不需要认证）
         GET /api/devices/{device_id}/deployment/
         """
         device = self.get_object()
@@ -180,10 +182,10 @@ class DeviceViewSet(viewsets.ModelViewSet):
         else:
             return Response({"status": "waiting"})
     
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
     def progress(self, request, device_id=None):
         """
-        上报部署/更新进度
+        上报部署/更新进度（Agent调用，不需要认证）
         POST /api/devices/{device_id}/progress/
         Body: {
             "status": "downloading",
@@ -279,9 +281,9 @@ class DeploymentTaskViewSet(viewsets.ModelViewSet):
     queryset = DeploymentTask.objects.all()
     serializer_class = DeploymentTaskSerializer
     
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
     def update_progress(self, request, pk=None):
-        """更新任务进度"""
+        """更新任务进度（Agent调用，不需要认证）"""
         task = self.get_object()
         
         task.status = request.data.get('status', task.status)
@@ -302,9 +304,9 @@ class UpdateTaskViewSet(viewsets.ModelViewSet):
     queryset = UpdateTask.objects.all()
     serializer_class = UpdateTaskSerializer
     
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
     def update_progress(self, request, pk=None):
-        """更新任务进度"""
+        """更新任务进度（Agent调用，不需要认证）"""
         task = self.get_object()
         
         task.status = request.data.get('status', task.status)
@@ -768,10 +770,10 @@ class CodePackageViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    @action(detail=True, methods=['get'])
+    @action(detail=True, methods=['get'], permission_classes=[AllowAny])
     def download(self, request, pk=None):
         """
-        下载代码包
+        下载代码包（Agent调用，不需要认证）
         GET /api/code-packages/{id}/download/
         """
         from django.http import FileResponse
@@ -1082,6 +1084,12 @@ class ProjectDeploymentViewSet(viewsets.ModelViewSet):
     queryset = ProjectDeployment.objects.all()
     serializer_class = ProjectDeploymentSerializer
     
+    def get_permissions(self):
+        """Agent调用的接口不需要认证"""
+        if self.action in ['list', 'retrieve', 'update_progress']:
+            return [AllowAny()]
+        return super().get_permissions()
+    
     def get_queryset(self):
         """支持按设备和项目过滤"""
         queryset = super().get_queryset()
@@ -1126,3 +1134,86 @@ class ProjectDeploymentViewSet(viewsets.ModelViewSet):
         deployment.save()
         
         return Response({"status": "updated"})
+
+
+# ==================== 用户认证 ====================
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def user_login(request):
+    """
+    用户登录
+    POST /api/auth/login/
+    Body: {
+        "username": "admin",
+        "password": "password"
+    }
+    """
+    username = request.data.get('username')
+    password = request.data.get('password')
+    
+    if not username or not password:
+        return Response(
+            {"error": "用户名和密码不能为空"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    user = authenticate(username=username, password=password)
+    
+    if user is None:
+        return Response(
+            {"error": "用户名或密码错误"},
+            status=status.HTTP_401_UNAUTHORIZED
+        )
+    
+    if not user.is_active:
+        return Response(
+            {"error": "用户已被禁用"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # 获取或创建 Token
+    token, created = Token.objects.get_or_create(user=user)
+    
+    return Response({
+        "token": token.key,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "is_staff": user.is_staff,
+            "is_superuser": user.is_superuser
+        }
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def user_logout(request):
+    """
+    用户登出
+    POST /api/auth/logout/
+    """
+    try:
+        request.user.auth_token.delete()
+    except:
+        pass
+    
+    return Response({"message": "已登出"})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def user_info(request):
+    """
+    获取当前用户信息
+    GET /api/auth/user/
+    """
+    user = request.user
+    return Response({
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "is_staff": user.is_staff,
+        "is_superuser": user.is_superuser
+    })
