@@ -31,6 +31,12 @@ class DeviceViewSet(viewsets.ModelViewSet):
     serializer_class = DeviceSerializer
     lookup_field = 'device_id'
     
+    def get_permissions(self):
+        """Agent 调用的接口不需要认证"""
+        if self.action in ['register', 'heartbeat', 'retrieve', 'list']:
+            return [AllowAny()]
+        return [IsAuthenticated()]
+    
     @action(detail=False, methods=['post'], permission_classes=[AllowAny])
     def register(self, request):
         """
