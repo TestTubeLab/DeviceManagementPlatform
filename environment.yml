@@ -21,3 +21,4 @@ dependencies:
     - django-cors-headers>=4.3.0
     - djangorestframework-simplejwt>=5.3.0
 
+

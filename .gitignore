@@ -31,8 +31,18 @@ env/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
-/media
-/staticfiles
+media/
+staticfiles/
+server/media/
+server/staticfiles/
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# Build artifacts
+*.zip
+device-platform.zip
 
 # Environment variables
 .env
@@ -66,4 +76,5 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
 

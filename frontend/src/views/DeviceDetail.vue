@@ -1,0 +1,335 @@
+<template>
+  <div class="device-detail" v-loading="deviceStore.loading">
+    <el-page-header @back="$router.back()">
+      <template #content>
+        <span class="page-title">设备详情</span>
+      </template>
+    </el-page-header>
+
+    <div v-if="device" class="detail-content">
+      <!-- 基本信息 -->
+      <el-card shadow="hover" class="info-card">
+        <template #header>
+          <div class="card-header-content">
+            <span class="card-title">基本信息</span>
+            <StatusBadge :status="device.status" />
+          </div>
+        </template>
+        <el-descriptions :column="3" border>
+          <el-descriptions-item label="设备ID">{{ device.device_id }}</el-descriptions-item>
+          <el-descriptions-item label="设备名称">{{ device.name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="安装位置">{{ device.location || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="MAC地址">{{ device.mac_address || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="IP地址">{{ device.ip_address || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="当前版本">{{ device.current_version || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="设备分组">{{ device.group || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="最后心跳">
+            {{ device.last_heartbeat ? formatTime(device.last_heartbeat) : '从未上线' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="创建时间">{{ formatTime(device.created_at) }}</el-descriptions-item>
+          <el-descriptions-item label="更新时间">{{ formatTime(device.updated_at) }}</el-descriptions-item>
+        </el-descriptions>
+      </el-card>
+      
+      <!-- 自动部署配置 -->
+      <el-card shadow="hover" class="info-card" style="margin-top: 20px">
+        <template #header>
+          <span class="card-title">自动部署配置</span>
+        </template>
+        <el-form label-width="120px">
+          <el-form-item label="自动部署项目">
+            <el-select
+              v-model="autoDeployProject"
+              placeholder="选择项目（设备上线时自动部署）"
+              clearable
+              filterable
+              style="width: 100%"
+              @change="handleAutoDeployChange"
+            >
+              <el-option
+                v-for="project in projects"
+                :key="project.id"
+                :label="`${project.name} (${project.version})`"
+                :value="project.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="设备分组">
+            <el-input
+              v-model="deviceGroup"
+              placeholder="如：XX医院-流水线A"
+              @blur="handleGroupChange"
+            />
+          </el-form-item>
+          <el-alert
+            title="提示：设置自动部署项目后，设备每次重启上线时会自动部署该项目"
+            type="info"
+            :closable="false"
+            style="margin-top: 16px"
+          />
+        </el-form>
+      </el-card>
+
+      <!-- 资源使用情况 -->
+      <el-row :gutter="20" style="margin-top: 20px">
+        <el-col :span="8">
+          <el-card shadow="hover">
+            <template #header>
+              <span class="card-title">CPU使用率</span>
+            </template>
+            <el-progress 
+              type="dashboard" 
+              :percentage="device.cpu_usage" 
+              :color="getProgressColor(device.cpu_usage)"
+            />
+          </el-card>
+        </el-col>
+        <el-col :span="8">
+          <el-card shadow="hover">
+            <template #header>
+              <span class="card-title">内存使用率</span>
+            </template>
+            <el-progress 
+              type="dashboard" 
+              :percentage="device.memory_usage"
+              :color="getProgressColor(device.memory_usage)"
+            />
+          </el-card>
+        </el-col>
+        <el-col :span="8">
+          <el-card shadow="hover">
+            <template #header>
+              <span class="card-title">磁盘使用率</span>
+            </template>
+            <el-progress 
+              type="dashboard" 
+              :percentage="device.disk_usage"
+              :color="getProgressColor(device.disk_usage)"
+            />
+          </el-card>
+        </el-col>
+      </el-row>
+
+      <!-- 操作按钮 -->
+      <el-card shadow="hover" style="margin-top: 20px">
+        <template #header>
+          <span class="card-title">设备操作</span>
+        </template>
+        <el-space>
+          <el-button type="primary" :icon="Upload" @click="showDeployDialog = true">
+            部署/更新
+          </el-button>
+          <el-button :icon="Refresh" @click="handleRestart">重启服务</el-button>
+          <el-button :icon="Setting" disabled title="配置管理功能开发中">配置管理</el-button>
+          <el-button :icon="Delete" type="danger" @click="handleDelete">删除设备</el-button>
+        </el-space>
+      </el-card>
+    </div>
+
+    <!-- 部署对话框 -->
+    <el-dialog v-model="showDeployDialog" title="部署/更新设备" width="500px">
+      <el-form :model="deployForm" label-width="100px">
+        <el-form-item label="目标版本" required>
+          <el-input v-model="deployForm.target_version" placeholder="v1.0.4" />
+        </el-form-item>
+        <el-form-item label="Socket主机">
+          <el-input v-model="deployForm.reverse_socket_host" placeholder="192.168.31.29" />
+        </el-form-item>
+        <el-form-item label="Socket端口">
+          <el-input-number v-model="deployForm.reverse_socket_port" :min="1" :max="65535" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showDeployDialog = false">取消</el-button>
+        <el-button type="primary" @click="deployDevice">确定</el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted, computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { Upload, Refresh, Setting, Delete } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { useDeviceStore } from '@/stores/device'
+import { createDeploymentTask } from '@/api/task'
+import { restartDevice, deleteDevice, updateDevice } from '@/api/device'
+import { getProjects } from '@/api/project'
+import StatusBadge from '@/components/StatusBadge.vue'
+import dayjs from 'dayjs'
+
+const route = useRoute()
+const router = useRouter()
+const deviceStore = useDeviceStore()
+
+const showDeployDialog = ref(false)
+const deployForm = ref({
+  target_version: '',
+  reverse_socket_host: '192.168.31.29',
+  reverse_socket_port: 9088,
+})
+
+const device = computed(() => deviceStore.currentDevice)
+const projects = ref<any[]>([])
+const autoDeployProject = ref<number | null>(null)
+const deviceGroup = ref('')
+
+// 监听device变化，更新自动部署项目和分组
+watch(device, (newDevice) => {
+  if (newDevice) {
+    autoDeployProject.value = newDevice.auto_deploy_project || null
+    deviceGroup.value = newDevice.group || ''
+  }
+}, { immediate: true })
+
+const formatTime = (time: string) => {
+  return dayjs(time).format('YYYY-MM-DD HH:mm:ss')
+}
+
+const getProgressColor = (percentage: number) => {
+  if (percentage < 60) return '#67c23a'
+  if (percentage < 80) return '#e6a23c'
+  return '#f56c6c'
+}
+
+const deployDevice = async () => {
+  if (!device.value || !deployForm.value.target_version) {
+    ElMessage.warning('请输入目标版本')
+    return
+  }
+
+  try {
+    await createDeploymentTask({
+      device: device.value.id,
+      target_version: deployForm.value.target_version,
+      config: {
+        reverse_socket_host: deployForm.value.reverse_socket_host,
+        reverse_socket_port: deployForm.value.reverse_socket_port,
+      },
+    })
+    ElMessage.success('部署任务创建成功')
+    showDeployDialog.value = false
+  } catch (error) {
+    ElMessage.error('部署任务创建失败')
+  }
+}
+
+const handleRestart = async () => {
+  if (!device.value) return
+  
+  try {
+    await ElMessageBox.confirm(
+      '确定要重启该设备的服务吗？',
+      '重启确认',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+    
+    await restartDevice(device.value.device_id)
+    ElMessage.success('重启任务已创建，设备将在下次心跳时执行重启')
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('重启任务创建失败')
+    }
+  }
+}
+
+const handleDelete = async () => {
+  if (!device.value) return
+  
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除设备 ${device.value.name || device.value.device_id} 吗？此操作不可恢复！`,
+      '删除确认',
+      {
+        confirmButtonText: '确定删除',
+        cancelButtonText: '取消',
+        type: 'error',
+      }
+    )
+    
+    await deleteDevice(device.value.device_id)
+    ElMessage.success('设备已删除')
+    router.push('/devices')
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('删除设备失败')
+    }
+  }
+}
+
+const handleAutoDeployChange = async () => {
+  if (!device.value) return
+  
+  try {
+    await updateDevice(device.value.device_id, {
+      auto_deploy_project: autoDeployProject.value
+    })
+    ElMessage.success('自动部署项目已设置')
+    deviceStore.loadDevice(device.value.device_id)
+  } catch (error) {
+    ElMessage.error('设置失败')
+  }
+}
+
+const handleGroupChange = async () => {
+  if (!device.value) return
+  
+  try {
+    await updateDevice(device.value.device_id, {
+      group: deviceGroup.value
+    })
+    ElMessage.success('设备分组已更新')
+  } catch (error) {
+    ElMessage.error('更新失败')
+  }
+}
+
+const loadProjects = async () => {
+  try {
+    const data = await getProjects()
+    projects.value = data.results
+  } catch (error) {
+    console.error('加载项目列表失败:', error)
+  }
+}
+
+onMounted(() => {
+  const deviceId = route.params.id as string
+  deviceStore.loadDevice(deviceId)
+  loadProjects()
+})
+</script>
+
+<style scoped>
+.device-detail {
+  padding: 0;
+}
+
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.detail-content {
+  margin-top: 20px;
+}
+
+.card-header-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.card-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+}
+</style>
+

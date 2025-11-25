@@ -1,14 +1,25 @@
 """
 设备管理API视图
 """
+import os
+import subprocess
+import json
+from django.conf import settings
 from django.utils import timezone
+from django.http import HttpResponse
 from rest_framework import viewsets, status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
-from .models import Device, DeploymentTask, UpdateTask, DeviceLog
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.permissions import AllowAny
+from .models import (
+    Device, DeploymentTask, UpdateTask, DeviceLog, DockerImage,
+    CodePackage, Project, ProjectConfig, ProjectDeployment
+)
 from .serializers import (
     DeviceSerializer, DeploymentTaskSerializer,
-    UpdateTaskSerializer, DeviceLogSerializer
+    UpdateTaskSerializer, DeviceLogSerializer, DockerImageSerializer,
+    CodePackageSerializer, ProjectSerializer, ProjectConfigSerializer, ProjectDeploymentSerializer
 )
 
 
@@ -57,10 +68,33 @@ class DeviceViewSet(viewsets.ModelViewSet):
             device.last_heartbeat = timezone.now()
             device.save()
         
+        # 🔥 自动部署逻辑：如果设备配置了自动部署项目，创建部署任务
+        auto_deploy_triggered = False
+        if device.auto_deploy_project:
+            # 检查是否已经有pending的部署任务
+            existing_deployment = ProjectDeployment.objects.filter(
+                device=device,
+                project=device.auto_deploy_project,
+                status__in=['pending', 'pulling_image', 'pulling_code', 'configuring', 'starting']
+            ).exists()
+            
+            if not existing_deployment:
+                # 创建自动部署任务
+                ProjectDeployment.objects.create(
+                    device=device,
+                    project=device.auto_deploy_project,
+                    deployed_version=device.auto_deploy_project.version,
+                    status='pending',
+                    message=f'设备上线，自动部署项目 {device.auto_deploy_project.name}'
+                )
+                auto_deploy_triggered = True
+        
         return Response({
             "device_id": device.device_id,
             "status": device.status,
             "created": created,
+            "auto_deploy_triggered": auto_deploy_triggered,
+            "auto_deploy_project": device.auto_deploy_project.name if device.auto_deploy_project else None
         })
     
     @action(detail=True, methods=['post'])
@@ -202,6 +236,42 @@ class DeviceViewSet(viewsets.ModelViewSet):
             "created_tasks": len(tasks),
             "task_ids": tasks
         })
+    
+    @action(detail=True, methods=['post'])
+    def restart(self, request, device_id=None):
+        """
+        重启设备服务
+        POST /api/devices/{device_id}/restart/
+        """
+        device = self.get_object()
+        
+        # 创建一个重启任务
+        task = DeploymentTask.objects.create(
+            device=device,
+            target_version=device.current_version or 'restart',
+            status='pending',
+            config={'action': 'restart_container'}
+        )
+        
+        return Response({
+            "status": "success",
+            "message": "重启任务已创建",
+            "task_id": task.id
+        })
+    
+    def destroy(self, request, *args, **kwargs):
+        """
+        删除设备
+        DELETE /api/devices/{device_id}/
+        """
+        device = self.get_object()
+        device_id = device.device_id
+        device.delete()
+        
+        return Response({
+            "status": "success",
+            "message": f"设备 {device_id} 已删除"
+        })
 
 
 class DeploymentTaskViewSet(viewsets.ModelViewSet):
@@ -261,3 +331,798 @@ class DeviceLogViewSet(viewsets.ModelViewSet):
         if device_id:
             queryset = queryset.filter(device__device_id=device_id)
         return queryset
+
+
+# ==================== 辅助函数 ====================
+
+def load_docker_image(tar_path):
+    """
+    加载Docker镜像文件（使用Docker CLI）
+    
+    参数:
+        tar_path: .tar文件的绝对路径
+    
+    返回:
+        (image_name, tag, image_id) 或抛出异常
+    """
+    try:
+        if not os.path.exists(tar_path):
+            raise Exception(f"文件不存在: {tar_path}")
+        
+        # 使用docker load命令加载镜像
+        result = subprocess.run(
+            ['docker', 'load', '-i', tar_path],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5分钟超时
+        )
+        
+        if result.returncode != 0:
+            raise Exception(f"Docker load失败: {result.stderr}")
+        
+        # 解析输出获取镜像信息
+        # 输出格式: "Loaded image: name:tag" 或 "Loaded image ID: sha256:..."
+        output = result.stdout.strip()
+        
+        if 'Loaded image:' in output:
+            # 提取镜像名称和标签
+            image_full = output.split('Loaded image:')[1].strip()
+            if ':' in image_full:
+                name, tag = image_full.rsplit(':', 1)
+            else:
+                name = image_full
+                tag = 'latest'
+        elif 'Loaded image ID:' in output:
+            # 只有ID，没有标签
+            image_id = output.split('Loaded image ID:')[1].strip()
+            # 使用docker inspect获取详细信息
+            inspect_result = subprocess.run(
+                ['docker', 'inspect', image_id],
+                capture_output=True,
+                text=True
+            )
+            if inspect_result.returncode == 0:
+                inspect_data = json.loads(inspect_result.stdout)[0]
+                tags = inspect_data.get('RepoTags', [])
+                if tags and tags[0] != '<none>:<none>':
+                    full_tag = tags[0]
+                    if ':' in full_tag:
+                        name, tag = full_tag.rsplit(':', 1)
+                    else:
+                        name = full_tag
+                        tag = 'latest'
+                else:
+                    name = 'unnamed'
+                    tag = image_id.replace('sha256:', '')[:12]
+            else:
+                name = 'unnamed'
+                tag = image_id.replace('sha256:', '')[:12]
+        else:
+            raise Exception(f"无法解析docker load输出: {output}")
+        
+        # 获取镜像ID
+        image_id_result = subprocess.run(
+            ['docker', 'images', '--format', '{{.ID}}', '--filter', f'reference={name}:{tag}'],
+            capture_output=True,
+            text=True
+        )
+        image_id = image_id_result.stdout.strip() if image_id_result.returncode == 0 else 'unknown'
+        
+        return (name, tag, image_id)
+    
+    except subprocess.TimeoutExpired:
+        raise Exception("加载镜像超时（超过5分钟）")
+    except FileNotFoundError:
+        raise Exception("Docker命令不存在，请确保Docker已安装并在PATH中")
+    except Exception as e:
+        raise Exception(f"加载镜像失败: {str(e)}")
+
+
+def push_to_registry(image_name, tag, registry_url='localhost:5000'):
+    """
+    推送镜像到Registry（使用Docker CLI）
+    
+    参数:
+        image_name: 镜像名称
+        tag: 标签
+        registry_url: Registry地址
+    
+    返回:
+        full_name: 完整镜像名称（registry_url/name:tag）
+    """
+    try:
+        # 构建完整名称
+        full_name = f"{registry_url}/{image_name}:{tag}"
+        
+        # 1. 检查原镜像是否存在
+        check_result = subprocess.run(
+            ['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}', '--filter', f'reference={image_name}:{tag}'],
+            capture_output=True,
+            text=True
+        )
+        
+        if not check_result.stdout.strip():
+            raise Exception(f"镜像不存在: {image_name}:{tag}")
+        
+        # 2. 打标签
+        tag_result = subprocess.run(
+            ['docker', 'tag', f'{image_name}:{tag}', full_name],
+            capture_output=True,
+            text=True
+        )
+        
+        if tag_result.returncode != 0:
+            raise Exception(f"打标签失败: {tag_result.stderr}")
+        
+        # 3. 推送到Registry
+        push_result = subprocess.run(
+            ['docker', 'push', full_name],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5分钟超时
+        )
+        
+        if push_result.returncode != 0:
+            raise Exception(f"推送失败: {push_result.stderr}")
+        
+        return full_name
+    
+    except subprocess.TimeoutExpired:
+        raise Exception("推送镜像超时（超过5分钟）")
+    except FileNotFoundError:
+        raise Exception("Docker命令不存在，请确保Docker已安装并在PATH中")
+    except Exception as e:
+        raise Exception(f"推送镜像失败: {str(e)}")
+
+
+# ==================== Docker镜像管理ViewSet ====================
+
+class DockerImageViewSet(viewsets.ModelViewSet):
+    """Docker镜像管理API"""
+    queryset = DockerImage.objects.filter(is_active=True)
+    serializer_class = DockerImageSerializer
+    parser_classes = (MultiPartParser, FormParser)
+    
+    @action(detail=False, methods=['post'])
+    def upload(self, request):
+        """
+        上传Docker镜像文件
+        POST /api/images/upload/
+        
+        请求格式: multipart/form-data
+        参数:
+        - file: .tar文件（必需）
+        - name: 镜像名称（可选）
+        - tag: 版本标签（可选）
+        - description: 描述（可选）
+        """
+        # 获取上传的文件
+        uploaded_file = request.FILES.get('file')
+        if not uploaded_file:
+            return Response(
+                {"error": "未提供文件"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # 验证文件扩展名
+        if not uploaded_file.name.endswith('.tar'):
+            return Response(
+                {"error": "只支持.tar格式的镜像文件"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # 1. 保存上传的文件
+            import datetime
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"{uploaded_file.name.rsplit('.', 1)[0]}_{timestamp}.tar"
+            
+            # 确保目录存在
+            upload_dir = os.path.join(settings.MEDIA_ROOT, 'docker_images')
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            file_path = os.path.join(upload_dir, filename)
+            
+            # 写入文件
+            with open(file_path, 'wb+') as destination:
+                for chunk in uploaded_file.chunks():
+                    destination.write(chunk)
+            
+            # 获取文件大小
+            file_size = os.path.getsize(file_path)
+            
+            # 2. 加载Docker镜像
+            try:
+                image_name, image_tag, image_id = load_docker_image(file_path)
+            except Exception as e:
+                # 加载失败，删除文件
+                os.remove(file_path)
+                return Response(
+                    {"error": f"加载镜像失败: {str(e)}"},
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY
+                )
+            
+            # 允许用户覆盖镜像名称和标签
+            final_name = request.data.get('name', image_name)
+            final_tag = request.data.get('tag', image_tag)
+            
+            # 3. 推送到Registry
+            try:
+                registry_url = getattr(settings, 'DOCKER_REGISTRY_URL', 'localhost:5000')
+                full_name = push_to_registry(final_name, final_tag, registry_url)
+            except Exception as e:
+                # 推送失败，删除文件
+                os.remove(file_path)
+                return Response(
+                    {"error": f"推送到Registry失败: {str(e)}"},
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+            
+            # 4. 保存到数据库
+            relative_path = os.path.join('docker_images', filename)
+            description = request.data.get('description', '')
+            
+            # 检查是否已存在相同的镜像
+            existing = DockerImage.objects.filter(
+                name=final_name,
+                tag=final_tag,
+                is_active=True
+            ).first()
+            
+            if existing:
+                # 更新现有记录
+                existing.full_name = full_name
+                existing.size = file_size
+                existing.file_path = relative_path
+                existing.description = description
+                existing.save()
+                docker_image = existing
+            else:
+                # 创建新记录
+                docker_image = DockerImage.objects.create(
+                    name=final_name,
+                    tag=final_tag,
+                    full_name=full_name,
+                    size=file_size,
+                    file_path=relative_path,
+                    description=description,
+                    created_by=request.user.username if request.user.is_authenticated else 'admin'
+                )
+            
+            serializer = self.get_serializer(docker_image)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        
+        except Exception as e:
+            return Response(
+                {"error": f"上传失败: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'])
+    def push_to_device(self, request, pk=None):
+        """
+        推送镜像到指定设备
+        POST /api/images/{id}/push_to_device/
+        
+        请求体:
+        {
+            "device_ids": ["dev_001", "dev_002"],
+            "container_name": "middleware",
+            "container_config": {
+                "ports": {"8000/tcp": 8000},
+                "environment": {"KEY": "value"}
+            }
+        }
+        """
+        docker_image = self.get_object()
+        device_ids = request.data.get('device_ids', [])
+        container_name = request.data.get('container_name', 'middleware')
+        container_config = request.data.get('container_config', {})
+        
+        if not device_ids:
+            return Response(
+                {"error": "未指定设备"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        created_tasks = []
+        failed_devices = []
+        
+        for device_id in device_ids:
+            try:
+                device = Device.objects.get(device_id=device_id)
+                
+                # 创建部署任务，把镜像信息放在config中
+                task = DeploymentTask.objects.create(
+                    device=device,
+                    target_version=docker_image.tag,
+                    status='pending',
+                    message=f"等待部署 {docker_image.name}:{docker_image.tag}",
+                    config={
+                        'image_name': docker_image.name,
+                        'image_tag': docker_image.tag,
+                        'full_name': docker_image.full_name,
+                        'container_name': container_name,
+                        'container_config': container_config
+                    }
+                )
+                
+                created_tasks.append({
+                    'task_id': task.id,
+                    'device_id': device_id,
+                    'device_name': device.name
+                })
+                
+            except Device.DoesNotExist:
+                failed_devices.append({
+                    'device_id': device_id,
+                    'error': '设备不存在'
+                })
+        
+        return Response({
+            "success": len(created_tasks),
+            "failed": len(failed_devices),
+            "created_tasks": created_tasks,
+            "failed_devices": failed_devices
+        })
+    
+    def destroy(self, request, pk=None):
+        """
+        删除镜像（软删除）
+        DELETE /api/images/{id}/
+        """
+        docker_image = self.get_object()
+        
+        # 软删除
+        docker_image.is_active = False
+        docker_image.save()
+        
+        return Response(
+            {"message": "镜像已删除"},
+            status=status.HTTP_204_NO_CONTENT
+        )
+
+
+# ==================== 代码包管理ViewSet ====================
+
+class CodePackageViewSet(viewsets.ModelViewSet):
+    """代码包管理API"""
+    queryset = CodePackage.objects.all()
+    serializer_class = CodePackageSerializer
+    parser_classes = (MultiPartParser, FormParser)
+    
+    @action(detail=False, methods=['post'])
+    def upload(self, request):
+        """
+        上传代码包
+        POST /api/code-packages/upload/
+        
+        请求格式: multipart/form-data
+        参数:
+        - file: .zip 或 .tar.gz 文件
+        - name: 包名称
+        - version: 版本号
+        - description: 更新说明（可选）
+        """
+        import hashlib
+        import datetime
+        
+        uploaded_file = request.FILES.get('file')
+        if not uploaded_file:
+            return Response(
+                {"error": "未提供文件"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # 验证文件格式
+        valid_extensions = ['.zip', '.tar.gz', '.tgz']
+        is_valid = any(uploaded_file.name.endswith(ext) for ext in valid_extensions)
+        if not is_valid:
+            return Response(
+                {"error": "只支持 .zip, .tar.gz, .tgz 格式的代码包"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        name = request.data.get('name', uploaded_file.name.split('.')[0])
+        version = request.data.get('version', 'v1.0.0')
+        description = request.data.get('description', '')
+        
+        try:
+            # 保存文件
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            ext = '.tar.gz' if '.tar.gz' in uploaded_file.name or '.tgz' in uploaded_file.name else '.zip'
+            filename = f"{name}_{version}_{timestamp}{ext}"
+            
+            upload_dir = os.path.join(settings.MEDIA_ROOT, 'code_packages')
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            file_path = os.path.join(upload_dir, filename)
+            
+            # 写入文件并计算校验和
+            md5_hash = hashlib.md5()
+            with open(file_path, 'wb+') as destination:
+                for chunk in uploaded_file.chunks():
+                    destination.write(chunk)
+                    md5_hash.update(chunk)
+            
+            file_size = os.path.getsize(file_path)
+            checksum = md5_hash.hexdigest()
+            
+            # 保存到数据库
+            code_package = CodePackage.objects.create(
+                name=name,
+                version=version,
+                file_path=os.path.join('code_packages', filename),
+                size=file_size,
+                checksum=checksum,
+                description=description,
+                created_by=request.user.username if request.user.is_authenticated else 'admin'
+            )
+            
+            serializer = self.get_serializer(code_package)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        
+        except Exception as e:
+            return Response(
+                {"error": f"上传失败: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['get'])
+    def download(self, request, pk=None):
+        """
+        下载代码包
+        GET /api/code-packages/{id}/download/
+        """
+        from django.http import FileResponse
+        
+        code_package = self.get_object()
+        file_path = os.path.join(settings.MEDIA_ROOT, code_package.file_path)
+        
+        if not os.path.exists(file_path):
+            return Response(
+                {"error": "文件不存在"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        response = FileResponse(
+            open(file_path, 'rb'),
+            content_type='application/octet-stream'
+        )
+        response['Content-Disposition'] = f'attachment; filename="{os.path.basename(file_path)}"'
+        return response
+
+
+# ==================== 安装脚本下载 ====================
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_install_script(request):
+    """
+    提供完整的bash安装脚本
+    GET /api/install.sh
+    使用方法: curl -fsSL http://your-server:8081/api/install.sh | sudo bash
+    """
+    # 获取服务器地址
+    host = request.get_host()
+    server_url = f"http://{host}/api"
+    
+    # 完整的bash安装脚本
+    script = f'''#!/bin/bash
+#
+# 设备管理平台 - 一键安装脚本
+# 自动安装Docker、Python依赖和设备Agent
+#
+
+set -e
+
+CLOUD_SERVER="{server_url}"
+
+echo "========================================"
+echo "设备管理平台 - 一键安装"
+echo "========================================"
+echo "管理中心: $CLOUD_SERVER"
+echo ""
+
+# 1. 安装依赖
+echo "[1/4] 安装依赖..."
+apt-get update -qq > /dev/null 2>&1
+apt-get install -y python3 python3-pip docker.io curl 2>&1 | grep -v "^W:" || true
+echo "  - Python3和Docker已安装"
+pip3 install -q requests psutil 2>&1 | grep -v "Requirement already satisfied" || true
+echo "  - Python依赖已安装"
+systemctl enable docker > /dev/null 2>&1 || true
+systemctl start docker > /dev/null 2>&1 || true
+echo "  - Docker服务已启动"
+
+# 2. 创建目录并清理旧设备ID
+echo "[2/4] 创建工作目录..."
+mkdir -p /opt/device-agent
+
+# 清理旧的设备ID，强制重新注册
+# 这样可以避免设备被删除后无法重新上线的问题
+if [ -f /etc/device-id ]; then
+    echo "  - 发现旧设备ID，清理中..."
+    rm -f /etc/device-id
+    echo "  - 设备将重新注册"
+fi
+
+# 3. 下载完整的Agent
+echo "[3/4] 下载Agent..."
+AGENT_URL="${{CLOUD_SERVER}}/agent/device-agent.py"
+
+if curl -fsSL "$AGENT_URL" -o /opt/device-agent/agent.py 2>/dev/null; then
+    echo "  - Agent下载成功 (curl)"
+elif wget -q "$AGENT_URL" -O /opt/device-agent/agent.py 2>/dev/null; then
+    echo "  - Agent下载成功 (wget)"
+else
+    echo "  - 下载失败！"
+    echo "  - URL: $AGENT_URL"
+    echo "  - 请检查网络连接和服务器状态"
+    exit 1
+fi
+
+# 验证文件
+if [ ! -f /opt/device-agent/agent.py ] || [ ! -s /opt/device-agent/agent.py ]; then
+    echo "  - Agent文件无效或为空"
+    exit 1
+fi
+
+FILE_SIZE=$(stat -f%z "/opt/device-agent/agent.py" 2>/dev/null || stat -c%s "/opt/device-agent/agent.py" 2>/dev/null)
+echo "  - Agent文件大小: ${{FILE_SIZE}} bytes"
+
+chmod +x /opt/device-agent/agent.py
+echo "  - 权限设置完成"
+
+# 4. 创建systemd服务
+echo "[4/4] 配置开机自启..."
+cat > /etc/systemd/system/device-agent.service <<EOF
+[Unit]
+Description=Device Management Agent
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=root
+Environment="CLOUD_SERVER=$CLOUD_SERVER"
+ExecStart=/usr/bin/python3 /opt/device-agent/agent.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+echo "  - Service文件已创建"
+
+systemctl daemon-reload
+echo "  - Systemd已重载"
+
+systemctl stop device-agent > /dev/null 2>&1 || true
+systemctl enable device-agent > /dev/null 2>&1
+echo "  - 开机自启已启用"
+
+systemctl start device-agent
+echo "  - Agent服务已启动"
+
+sleep 2
+
+# 检查服务状态
+if systemctl is-active --quiet device-agent; then
+    echo ""
+    echo "========================================"
+    echo "✓ 安装成功！"
+    echo "========================================"
+    echo ""
+    echo "Agent已启动，设备正在连接管理中心..."
+    echo "请在管理界面查看设备状态"
+    echo ""
+    echo "常用命令:"
+    echo "  查看日志: sudo journalctl -u device-agent -f"
+    echo "  重启服务: sudo systemctl restart device-agent"
+    echo "  查看状态: sudo systemctl status device-agent"
+    echo ""
+else
+    echo ""
+    echo "========================================"
+    echo "! 安装完成但服务启动失败"
+    echo "========================================"
+    echo ""
+    echo "请查看日志排查问题:"
+    echo "  sudo journalctl -u device-agent -n 50"
+    echo ""
+fi
+'''
+    
+    return HttpResponse(script, content_type='text/x-sh; charset=utf-8')
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_agent_script(request):
+    """
+    提供完整的Device Agent脚本下载
+    GET /api/agent/device-agent.py
+    """
+    import os
+    from django.conf import settings
+    
+    # 读取完整的device-agent.py文件
+    agent_path = os.path.join(settings.BASE_DIR, '..', 'device-agent', 'device-agent.py')
+    
+    try:
+        with open(agent_path, 'r', encoding='utf-8') as f:
+            agent_script = f.read()
+        
+        # 动态替换CLOUD_SERVER地址
+        host = request.get_host()
+        server_url = f"http://{host}/api"
+        
+        # 替换默认的CLOUD_SERVER值
+        agent_script = agent_script.replace(
+            'CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://localhost:8000/api")',
+            f'CLOUD_SERVER = os.getenv("CLOUD_SERVER", "{server_url}")'
+        )
+        
+        return HttpResponse(agent_script, content_type='text/plain')
+    except FileNotFoundError:
+        return Response(
+            {"error": "Agent script not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+# ==================== 项目管理 ====================
+
+class ProjectViewSet(viewsets.ModelViewSet):
+    """项目管理API"""
+    queryset = Project.objects.all()
+    serializer_class = ProjectSerializer
+    
+    @action(detail=True, methods=['post'])
+    def deploy_to_devices(self, request, pk=None):
+        """
+        部署项目到指定设备
+        POST /api/projects/{id}/deploy_to_devices/
+        Body: {
+            "device_ids": ["DEV-001", "DEV-002"]
+        }
+        """
+        project = self.get_object()
+        device_ids = request.data.get('device_ids', [])
+        
+        if not device_ids:
+            return Response(
+                {"error": "device_ids is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        created_deployments = []
+        failed_devices = []
+        
+        for device_id in device_ids:
+            try:
+                device = Device.objects.get(device_id=device_id)
+                
+                # 创建部署任务
+                deployment = ProjectDeployment.objects.create(
+                    project=project,
+                    device=device,
+                    deployed_version=project.version,
+                    status='pending',
+                    message=f'准备部署项目 {project.name}'
+                )
+                
+                created_deployments.append({
+                    'deployment_id': deployment.id,
+                    'device_id': device_id
+                })
+                
+            except Device.DoesNotExist:
+                failed_devices.append({
+                    'device_id': device_id,
+                    'error': '设备不存在'
+                })
+        
+        return Response({
+            "success": len(created_deployments),
+            "failed": len(failed_devices),
+            "deployments": created_deployments,
+            "failed_devices": failed_devices
+        })
+    
+    @action(detail=True, methods=['post'])
+    def set_config(self, request, pk=None):
+        """
+        设置项目配置
+        POST /api/projects/{id}/set_config/
+        Body: {
+            "configs": [
+                {"key": "CAMERA_IP", "value": "192.168.1.100", "description": "相机IP"},
+                {"key": "THRESHOLD", "value": "0.85"}
+            ]
+        }
+        """
+        project = self.get_object()
+        configs = request.data.get('configs', [])
+        
+        created_count = 0
+        updated_count = 0
+        
+        for config_data in configs:
+            key = config_data.get('key')
+            value = config_data.get('value')
+            
+            if not key:
+                continue
+            
+            config, created = ProjectConfig.objects.update_or_create(
+                project=project,
+                key=key,
+                defaults={
+                    'value': value,
+                    'description': config_data.get('description', ''),
+                    'is_secret': config_data.get('is_secret', False)
+                }
+            )
+            
+            if created:
+                created_count += 1
+            else:
+                updated_count += 1
+        
+        return Response({
+            "message": "配置已更新",
+            "created": created_count,
+            "updated": updated_count
+        })
+
+
+class ProjectDeploymentViewSet(viewsets.ModelViewSet):
+    """项目部署管理API"""
+    queryset = ProjectDeployment.objects.all()
+    serializer_class = ProjectDeploymentSerializer
+    
+    def get_queryset(self):
+        """支持按设备和项目过滤"""
+        queryset = super().get_queryset()
+        device_id = self.request.query_params.get('device_id')
+        project_id = self.request.query_params.get('project_id')
+        status = self.request.query_params.get('status')
+        
+        if device_id:
+            queryset = queryset.filter(device__device_id=device_id)
+        if project_id:
+            queryset = queryset.filter(project_id=project_id)
+        if status:
+            queryset = queryset.filter(status=status)
+        
+        return queryset
+    
+    @action(detail=True, methods=['post'])
+    def update_progress(self, request, pk=None):
+        """
+        更新部署进度（Agent调用）
+        POST /api/project-deployments/{id}/update_progress/
+        Body: {
+            "status": "pulling_code",
+            "progress": 50,
+            "message": "正在拉取代码...",
+            "git_commit": "abc123"
+        }
+        """
+        deployment = self.get_object()
+        
+        deployment.status = request.data.get('status', deployment.status)
+        deployment.progress = request.data.get('progress', deployment.progress)
+        deployment.message = request.data.get('message', deployment.message)
+        deployment.error_message = request.data.get('error_message', deployment.error_message)
+        
+        if request.data.get('git_commit'):
+            deployment.git_commit = request.data['git_commit']
+        
+        if deployment.status in ['completed', 'failed']:
+            deployment.completed_at = timezone.now()
+        
+        deployment.save()
+        
+        return Response({"status": "updated"})

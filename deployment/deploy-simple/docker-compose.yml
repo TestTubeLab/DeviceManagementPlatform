@@ -1,0 +1,33 @@
+version: '3.8'
+
+# 简化部署版本 - 适用于共享服务器
+# 使用SQLite数据库，单一后端服务
+
+services:
+  # Django后端 + 前端静态文件
+  app:
+    build:
+      context: ../..
+      dockerfile: deployment/deploy-simple/Dockerfile
+    container_name: device-platform
+    ports:
+      - "${PORT:-8081}:8081"
+    environment:
+      - DEBUG=False
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - ALLOWED_HOSTS=*
+      - SERVER_URL=${SERVER_URL:-http://localhost:8081}
+    volumes:
+      - app_data:/app/data
+      - app_media:/app/media
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/api/devices/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  app_data:
+  app_media:
+

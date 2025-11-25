@@ -1,154 +1,141 @@
 # 设备管理平台 (Device Management Platform)
 
-> 医疗自动化流水线视觉检测系统 - 远程设备管理与部署平台
+> 远程设备管理与自动化部署平台 - 专为边缘计算/IoT设备设计
 
 ## 🎯 项目简介
 
-这是一个轻量级的IoT设备远程管理平台，专为边缘计算设备设计，实现：
+轻量级的远程设备管理平台，实现开发板/边缘设备的集中管理与自动化部署：
 
-- ✅ **零接触部署**：新设备通电即可自动注册，Web界面一键部署
-- ✅ **OTA远程更新**：代码push自动构建，批量推送更新到所有设备
-- ✅ **集中监控**：实时查看所有设备状态、日志、性能指标
-- ✅ **配置管理**：远程修改配置，无需现场操作
-- ✅ **故障诊断**：远程日志查看、SSH调试
+- ✅ **一键安装**：设备执行一条命令即可自动注册到平台
+- ✅ **项目管理**：管理Docker镜像、代码包、配置，一键部署到设备
+- ✅ **远程部署**：Web界面选择设备，批量推送项目
+- ✅ **实时监控**：设备在线状态、心跳监测
+- ✅ **配置管理**：远程修改项目配置，自动同步到设备
 
 ## 📦 项目结构
 
 ```
 DeviceManagementPlatform/
-├── server/                 # 管理后台（Django）
-│   ├── management/         # 设备管理核心应用
-│   ├── config/             # 配置文件
-│   └── requirements.txt    # Python依赖
+├── frontend/               # Vue3 前端
+│   └── src/
+│       ├── views/          # 页面（设备管理、项目管理、部署中心等）
+│       ├── api/            # API接口
+│       └── components/     # 组件
 │
-├── device-agent/           # 设备端代理
-│   ├── bootstrap-agent.py  # 开机自启动代理（等待部署）
-│   ├── device-agent.py     # 监控和更新代理（运行态）
-│   └── install.sh          # 一键安装脚本
+├── server/                 # Django 后端
+│   ├── management/         # 核心应用（models, views, serializers）
+│   ├── core/               # Django配置
+│   └── media/              # 上传文件存储
+│
+├── device-agent/           # 设备端Agent
+│   ├── device-agent.py     # 主Agent（心跳、任务轮询、部署执行）
+│   ├── bootstrap-agent.py  # 引导脚本
+│   └── install.sh          # 本地安装脚本
 │
 ├── deployment/             # 部署配置
-│   ├── docker-compose.yml  # 服务器端Docker配置
-│   ├── nginx.conf          # 反向代理配置
-│   └── .github/            # CI/CD配置
+│   ├── deploy-simple/      # 简化Docker部署（推荐）
+│   ├── docker-compose.yml  # 完整部署配置
+│   └── nginx.conf          # Nginx配置
 │
 └── docs/                   # 文档
-    ├── INSTALL.md          # 安装指南
-    ├── USAGE.md            # 使用手册
-    └── API.md              # API文档
 ```
 
 ## 🚀 快速开始
 
-### 1. 服务器端部署（腾讯云）
+### 1. 服务器部署（云服务器/本地服务器）
 
 ```bash
 # 克隆项目
 git clone https://github.com/your-org/DeviceManagementPlatform.git
 cd DeviceManagementPlatform
 
-# 创建conda环境
-conda env create -f environment.yml
-conda activate device-mgmt
+# 一键Docker部署
+cd deployment/deploy-simple
+chmod +x deploy.sh entrypoint.sh
+./deploy.sh 8081    # 端口可自定义
 
-# 部署服务
-cd deployment
-docker-compose up -d
-
-# 访问管理后台
-# http://your-server-ip
+# 访问管理界面
+# http://服务器IP:8081
+# 默认账号: admin / admin123
 ```
 
-### 2. 设备端部署（边缘设备）
+### 2. 设备端安装（开发板/边缘设备）
 
-#### 方式A：使用预制镜像（推荐）
+在设备上执行一条命令：
 ```bash
-# 1. 烧录 golden-system.img 到SD卡
-# 2. 插卡、接网线、通电
-# 3. 在Web管理界面点击[一键部署]
+curl -fsSL http://服务器IP:8081/api/install.sh | sudo bash
 ```
 
-#### 方式B：手动安装
-```bash
-# 在新设备上执行
-curl -fsSL http://your-server/install.sh | bash
-```
+设备会自动：
+1. 安装依赖（Python3、Docker）
+2. 下载Agent脚本
+3. 配置开机自启
+4. 注册到管理平台
 
-## 📖 详细文档
+### 3. 开始使用
 
-- [安装指南](docs/INSTALL.md) - 完整的安装步骤
-- [使用手册](docs/USAGE.md) - 功能说明和操作指南
-- [API文档](docs/API.md) - RESTful API参考
-- [故障排查](docs/TROUBLESHOOTING.md) - 常见问题解决
+1. 打开Web管理界面，在「设备管理」查看已注册的设备
+2. 在「镜像仓库」上传Docker镜像
+3. 在「项目管理」创建项目，关联镜像和配置
+4. 选择设备，一键部署项目
 
 ## 🔧 技术栈
 
-### 服务器端
-- **Web框架**: Django 5.0+ / Django REST Framework
-- **数据库**: PostgreSQL 14
-- **消息队列**: Redis (可选)
-- **容器化**: Docker + Docker Compose
-- **反向代理**: Nginx
-
-### 设备端
-- **运行时**: Python 3.10+
-- **容器**: Docker
-- **通信**: HTTP/HTTPS + WebSocket
+| 层级 | 技术 |
+|------|------|
+| 前端 | Vue 3 + TypeScript + Element Plus + Vite |
+| 后端 | Django 5 + Django REST Framework |
+| 数据库 | SQLite（开发）/ PostgreSQL（生产） |
+| 部署 | Docker + Nginx |
+| 设备端 | Python 3 + Docker |
 
 ## 📊 系统架构
 
 ```
-┌─────────────────────────────────────┐
-│      腾讯云服务器 (4C8G12M)           │
-│  ┌───────────────────────────────┐  │
-│  │  管理后台 (Django)             │  │
-│  │  - 设备列表                    │  │
-│  │  - 部署向导                    │  │
-│  │  - 更新管理                    │  │
-│  │  - 日志查看                    │  │
-│  └───────────────────────────────┘  │
-│  ┌───────────────────────────────┐  │
-│  │  Docker Registry              │  │
-│  │  - 镜像仓库                    │  │
-│  └───────────────────────────────┘  │
-└─────────────────┬───────────────────┘
-                  │ 互联网
-     ┌────────────┼────────────┐
-     │            │            │
- ┌───▼───┐   ┌───▼───┐   ┌───▼───┐
- │设备A   │   │设备B   │   │设备C   │
- │Agent  │   │Agent  │   │Agent  │
- └───────┘   └───────┘   └───────┘
+┌─────────────────────────────────────────┐
+│         云服务器 / 管理中心               │
+│  ┌─────────────┐  ┌─────────────────┐   │
+│  │  Vue前端    │  │  Django后端      │   │
+│  │  - 设备管理  │  │  - REST API     │   │
+│  │  - 项目管理  │  │  - 任务调度      │   │
+│  │  - 部署中心  │  │  - 文件存储      │   │
+│  └─────────────┘  └─────────────────┘   │
+└────────────────────┬────────────────────┘
+                     │ HTTP (心跳/任务轮询)
+        ┌────────────┼────────────┐
+        │            │            │
+   ┌────▼────┐  ┌────▼────┐  ┌────▼────┐
+   │ 设备A    │  │ 设备B    │  │ 设备C    │
+   │ Agent   │  │ Agent   │  │ Agent   │
+   │ Docker  │  │ Docker  │  │ Docker  │
+   └─────────┘  └─────────┘  └─────────┘
 ```
 
 ## 💡 核心功能
 
-### 1. 零接触部署
-- 新设备自动注册
-- Web界面配置
-- 自动下载镜像
-- 一键启动服务
+### 设备管理
+- 设备自动注册与发现
+- 实时在线状态监控
+- 设备分组与标签
+- 自动部署项目配置
 
-### 2. OTA远程更新
-- Git push自动触发构建
-- 批量更新设备
-- 进度实时显示
-- 失败自动回滚
+### 项目管理
+- Docker镜像上传与管理
+- 代码包上传（环境镜像+代码分离）
+- 项目配置管理（环境变量、端口映射等）
+- 容器高级配置（runtime、network、privileged等）
 
-### 3. 设备监控
-- 在线状态
-- CPU/内存/磁盘使用率
-- 实时日志查看
-- 告警通知
+### 部署中心
+- 选择设备批量部署
+- 部署进度实时显示
+- 部署历史记录
 
-### 4. 配置管理
-- Web界面修改配置
-- 自动同步到设备
-- 版本控制
-- 一键回滚
+## 📖 文档
 
-## 🤝 贡献指南
-
-欢迎提交Issue和Pull Request！
+- [云部署指南](CLOUD_DEPLOY_GUIDE.md) - 服务器部署步骤
+- [API文档](docs/API.md) - RESTful API参考
+- [安装指南](docs/INSTALL.md) - 详细安装说明
+- [使用手册](docs/USAGE.md) - 功能操作指南
 
 ## 📄 许可证
 
@@ -157,10 +144,3 @@ MIT License
 ## 👥 作者
 
 - 开发团队：YMS Tech
-- 联系方式：tech@yms.com
-
-## 🔗 相关项目
-
-- [MiddlewareServer](https://github.com/your-org/MiddlewareServer) - 主项目
-- [tubeOrientationAndLiquidDetection](https://github.com/your-org/tubeOrientationAndLiquidDetection) - 检测模块
-
