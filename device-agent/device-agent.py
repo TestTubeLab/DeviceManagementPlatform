@@ -598,7 +598,7 @@ def download_and_extract_code_package(code_package_info, target_dir):
 
 
 def execute_project_deployment(deployment):
-    """执行项目部署（支持代码包）"""
+    """执行项目部署（支持代码包 + 本地镜像）"""
     deployment_id = deployment['id']
     project = deployment.get('project_info') or deployment.get('project')
     
@@ -615,14 +615,30 @@ def execute_project_deployment(deployment):
     git_commit = ""
     
     try:
-        # ========== 步骤1: 拉取Docker镜像 ==========
+        # ========== 步骤1: 检查Docker镜像 ==========
         report_project_deployment_progress(deployment_id, status="pulling_image", progress=10, 
-                                           message="正在拉取Docker镜像...")
+                                           message="正在检查Docker镜像...")
         
         docker_image = project.get('docker_image_info')
+        # 支持直接指定本地镜像名称
+        local_image_name = project.get('local_image_name', '')
         image_full_name = None
         
-        if docker_image:
+        if local_image_name:
+            # 使用本地预装镜像（不拉取）
+            image_full_name = local_image_name
+            logger.info(f"使用本地镜像: {image_full_name}")
+            
+            # 检查镜像是否存在
+            check_result = subprocess.run(
+                ["docker", "images", "-q", image_full_name],
+                capture_output=True, text=True
+            )
+            if not check_result.stdout.strip():
+                raise Exception(f"本地镜像不存在: {image_full_name}")
+            logger.info("本地镜像检查通过")
+            
+        elif docker_image:
             image_full_name = docker_image.get('full_name')
             logger.info(f"拉取镜像: {image_full_name}")
             result = subprocess.run(
@@ -726,7 +742,16 @@ def execute_project_deployment(deployment):
         if image_full_name:
             cmd = ["docker", "run", "-d", "--name", container_name]
             
-            # 网络模式（支持host模式）
+            # 重启策略
+            restart_policy = container_config.get('restart_policy', 'unless-stopped')
+            cmd.extend(["--restart", restart_policy])
+            
+            # GPU支持（NVIDIA runtime）- 你的场景需要这个
+            runtime = container_config.get('runtime', '')
+            if runtime == 'nvidia':
+                cmd.extend(["--runtime", "nvidia"])
+            
+            # 网络模式（支持host模式）- 你的场景需要这个
             network_mode = container_config.get('network_mode', '')
             if network_mode == 'host':
                 cmd.extend(["--network", "host"])
@@ -737,12 +762,7 @@ def execute_project_deployment(deployment):
                     port_num = str(container_port).replace('/tcp', '').replace('/udp', '')
                     cmd.extend(["-p", f"{host_port}:{port_num}"])
             
-            # GPU支持（NVIDIA runtime）
-            runtime = container_config.get('runtime', '')
-            if runtime == 'nvidia':
-                cmd.extend(["--runtime", "nvidia"])
-            
-            # 挂载代码目录
+            # 挂载代码目录到 /work
             cmd.extend(["-v", f"{code_mount_path}:{work_dir}"])
             
             # 挂载配置目录
@@ -753,11 +773,11 @@ def execute_project_deployment(deployment):
             for key, value in environment.items():
                 cmd.extend(["-e", f"{key}={value}"])
             
-            # 特权模式（访问摄像头等硬件需要）
+            # 特权模式（访问摄像头、串口等硬件需要）
             if container_config.get('privileged', False):
                 cmd.append("--privileged")
             
-            # 设备映射
+            # 设备映射（如 /dev/video0, /dev/ttyUSB0）
             devices = container_config.get('devices', [])
             for device in devices:
                 cmd.extend(["--device", device])
@@ -767,16 +787,17 @@ def execute_project_deployment(deployment):
             for host_path, container_path in volumes.items():
                 cmd.extend(["-v", f"{host_path}:{container_path}"])
             
-            # 重启策略
-            restart_policy = container_config.get('restart_policy', 'unless-stopped')
-            cmd.extend(["--restart", restart_policy])
-            
             # 镜像名称
             cmd.append(image_full_name)
             
             # 启动命令
+            # 支持你的格式: /bin/bash -c "cp /work/.../start.sh /start.sh && chmod +x /start.sh && /start.sh"
             if start_command:
-                cmd.extend(["sh", "-c", start_command])
+                # 如果启动命令包含复杂脚本，用 bash -c 执行
+                if '&&' in start_command or '|' in start_command or ';' in start_command:
+                    cmd.extend(["/bin/bash", "-c", start_command])
+                else:
+                    cmd.append(start_command)
             
             logger.info(f"启动容器: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)

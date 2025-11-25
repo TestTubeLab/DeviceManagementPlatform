@@ -21,7 +21,12 @@
         </el-table-column>
         <el-table-column label="Docker镜像" width="200">
           <template #default="{ row }">
-            <span v-if="row.docker_image_info">
+            <span v-if="row.local_image_name">
+              <el-tag size="small" type="success">本地</el-tag>
+              {{ row.local_image_name }}
+            </span>
+            <span v-else-if="row.docker_image_info">
+              <el-tag size="small">平台</el-tag>
               {{ row.docker_image_info.name }}:{{ row.docker_image_info.tag }}
             </span>
             <span v-else class="text-gray">未设置</span>
@@ -76,10 +81,24 @@
           </el-radio-group>
         </el-form-item>
 
-        <el-divider content-position="left">Docker配置</el-divider>
+        <el-divider content-position="left">Docker镜像配置</el-divider>
         
-        <el-form-item label="Docker镜像">
-          <el-select v-model="projectForm.docker_image" placeholder="选择镜像" clearable filterable>
+        <el-alert type="info" :closable="false" style="margin-bottom: 16px">
+          <template #title>
+            <strong>推荐方式</strong>：使用设备预装镜像（如 newserver:latest），避免传输大文件
+          </template>
+        </el-alert>
+        
+        <el-form-item label="本地镜像名">
+          <el-input 
+            v-model="projectForm.local_image_name" 
+            placeholder="设备预装镜像名称，如：newserver:latest"
+          />
+          <div class="form-tip">设备上已有的镜像，直接使用不拉取（推荐）</div>
+        </el-form-item>
+        
+        <el-form-item label="或选择平台镜像">
+          <el-select v-model="projectForm.docker_image" placeholder="从平台上传的镜像" clearable filterable>
             <el-option
               v-for="image in dockerImages"
               :key="image.id"
@@ -87,10 +106,31 @@
               :value="image.id"
             />
           </el-select>
+          <div class="form-tip">平台托管的镜像（需要设备拉取，较慢）</div>
         </el-form-item>
         
         <el-form-item label="容器名称">
-          <el-input v-model="projectForm.container_name" placeholder="如：ct-app" />
+          <el-input v-model="projectForm.container_name" placeholder="如：middleware" />
+        </el-form-item>
+        
+        <el-divider content-position="left">容器运行参数</el-divider>
+        
+        <el-form-item label="GPU支持">
+          <el-switch v-model="projectForm.container_config.runtime_nvidia" active-text="启用NVIDIA Runtime" />
+          <div class="form-tip">如需使用GPU，请开启此选项（需设备已安装nvidia-container-toolkit）</div>
+        </el-form-item>
+        
+        <el-form-item label="网络模式">
+          <el-radio-group v-model="projectForm.container_config.network_mode">
+            <el-radio label="host">主机网络 (host)</el-radio>
+            <el-radio label="">桥接网络 (bridge)</el-radio>
+          </el-radio-group>
+          <div class="form-tip">主机网络可直接使用宿主机端口</div>
+        </el-form-item>
+        
+        <el-form-item label="特权模式">
+          <el-switch v-model="projectForm.container_config.privileged" active-text="启用特权模式" />
+          <div class="form-tip">访问摄像头、串口等硬件设备需要特权模式</div>
         </el-form-item>
 
         <el-divider content-position="left">代码配置（二选一）</el-divider>
@@ -158,8 +198,25 @@
       <div v-if="deployingProject">
         <div class="deploy-info">
           <p><strong>项目：</strong>{{ deployingProject.name }} ({{ deployingProject.version }})</p>
-          <p><strong>镜像：</strong>{{ deployingProject.docker_image_info?.full_name || '未设置' }}</p>
-          <p><strong>代码：</strong>{{ deployingProject.git_repo || '未设置' }}</p>
+          <p><strong>镜像：</strong>
+            <span v-if="deployingProject.local_image_name">
+              <el-tag size="small" type="success">本地</el-tag>
+              {{ deployingProject.local_image_name }}
+            </span>
+            <span v-else-if="deployingProject.docker_image_info">
+              <el-tag size="small">平台</el-tag>
+              {{ deployingProject.docker_image_info.full_name }}
+            </span>
+            <span v-else class="text-gray">未设置</span>
+          </p>
+          <p><strong>代码：</strong>
+            <span v-if="deployingProject.code_package_info">
+              {{ deployingProject.code_package_info.name }} ({{ deployingProject.code_package_info.version }})
+            </span>
+            <span v-else-if="deployingProject.git_repo">{{ deployingProject.git_repo }}</span>
+            <span v-else class="text-gray">未设置</span>
+          </p>
+          <p><strong>启动命令：</strong>{{ deployingProject.start_command }}</p>
         </div>
         
         <el-divider />
@@ -215,7 +272,15 @@
             {{ viewingProject.deployed_devices_count || 0 }} 台
           </el-descriptions-item>
           <el-descriptions-item label="Docker镜像" :span="2">
-            {{ viewingProject.docker_image_info?.full_name || '未设置' }}
+            <span v-if="viewingProject.local_image_name">
+              <el-tag size="small" type="success">本地预装</el-tag>
+              {{ viewingProject.local_image_name }}
+            </span>
+            <span v-else-if="viewingProject.docker_image_info">
+              <el-tag size="small">平台托管</el-tag>
+              {{ viewingProject.docker_image_info.full_name }}
+            </span>
+            <span v-else class="text-gray">未设置</span>
           </el-descriptions-item>
           <el-descriptions-item label="代码包" :span="2">
             <span v-if="viewingProject.code_package_info">
@@ -430,18 +495,64 @@ const projectForm = ref({
   version: 'v1.0.0',
   status: 'active' as const,
   docker_image: null as number | null,
+  local_image_name: '',  // 本地预装镜像名
   code_package: null as number | null,
   code_mount_path: '/opt/project-code',
   git_repo: '',
   git_branch: 'main',
   work_dir: '/work',
-  start_command: '/start.sh',
-  container_name: 'app',
-  container_config: {}
+  start_command: '/work/MiddlewareServer/start.sh',  // 默认启动脚本路径
+  container_name: 'middleware',  // 默认容器名
+  container_config: {
+    runtime_nvidia: true,      // 默认启用GPU
+    network_mode: 'host',      // 默认使用host网络
+    privileged: true,          // 默认启用特权模式
+    restart_policy: 'unless-stopped'
+  } as Record<string, any>
 })
 
 const formatTime = (time: string) => {
   return dayjs(time).format('YYYY-MM-DD HH:mm:ss')
+}
+
+const resetProjectForm = () => {
+  projectForm.value = {
+    name: '',
+    description: '',
+    version: 'v1.0.0',
+    status: 'active',
+    docker_image: null,
+    local_image_name: '',
+    code_package: null,
+    code_mount_path: '/opt/project-code',
+    git_repo: '',
+    git_branch: 'main',
+    work_dir: '/work',
+    start_command: '/work/MiddlewareServer/start.sh',
+    container_name: 'middleware',
+    container_config: {
+      runtime_nvidia: true,
+      network_mode: 'host',
+      privileged: true,
+      restart_policy: 'unless-stopped'
+    }
+  }
+}
+
+// 转换前端表单到后端格式
+const prepareProjectData = () => {
+  const formData = { ...projectForm.value }
+  const config = formData.container_config as Record<string, any>
+  
+  // 转换容器配置格式
+  formData.container_config = {
+    runtime: config.runtime_nvidia ? 'nvidia' : '',
+    network_mode: config.network_mode || '',
+    privileged: config.privileged || false,
+    restart_policy: config.restart_policy || 'unless-stopped'
+  }
+  
+  return formData
 }
 
 const loadProjects = async () => {
@@ -540,12 +651,14 @@ const handleUploadCodePackage = async () => {
 
 const editProject = (project: Project) => {
   editingProject.value = project
+  const config = project.container_config || {}
   projectForm.value = {
     name: project.name,
     description: project.description,
     version: project.version,
     status: project.status,
     docker_image: project.docker_image,
+    local_image_name: project.local_image_name || '',
     code_package: project.code_package,
     code_mount_path: project.code_mount_path || '/opt/project-code',
     git_repo: project.git_repo,
@@ -553,7 +666,12 @@ const editProject = (project: Project) => {
     work_dir: project.work_dir,
     start_command: project.start_command,
     container_name: project.container_name,
-    container_config: project.container_config
+    container_config: {
+      runtime_nvidia: config.runtime === 'nvidia' || config.runtime_nvidia || false,
+      network_mode: config.network_mode || '',
+      privileged: config.privileged || false,
+      restart_policy: config.restart_policy || 'unless-stopped'
+    }
   }
   showCreateDialog.value = true
 }
@@ -590,32 +708,26 @@ const handleSaveProject = async () => {
     return
   }
 
+  // 验证必须指定镜像（本地镜像或平台镜像）
+  if (!projectForm.value.local_image_name && !projectForm.value.docker_image) {
+    ElMessage.warning('请指定本地镜像名称或选择平台镜像')
+    return
+  }
+
   try {
+    const projectData = prepareProjectData()
+    
     if (editingProject.value) {
-      await updateProject(editingProject.value.id, projectForm.value)
+      await updateProject(editingProject.value.id, projectData)
       ElMessage.success('项目更新成功')
     } else {
-      await createProject(projectForm.value)
+      await createProject(projectData)
       ElMessage.success('项目创建成功')
     }
     
     showCreateDialog.value = false
     editingProject.value = null
-    projectForm.value = {
-      name: '',
-      description: '',
-      version: 'v1.0.0',
-      status: 'active',
-      docker_image: null,
-      code_package: null,
-      code_mount_path: '/opt/project-code',
-      git_repo: '',
-      git_branch: 'main',
-      work_dir: '/work',
-      start_command: '/start.sh',
-      container_name: 'app',
-      container_config: {}
-    }
+    resetProjectForm()
     
     await loadProjects()
   } catch (error) {

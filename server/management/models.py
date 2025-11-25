@@ -62,10 +62,13 @@ class Project(models.Model):
     version = models.CharField(max_length=50, verbose_name='当前版本')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active', verbose_name='状态')
     
-    # Docker镜像（环境）
+    # Docker镜像（环境）- 从平台上传的镜像
     docker_image = models.ForeignKey(
-        DockerImage, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='Docker镜像(环境)'
+        DockerImage, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='Docker镜像(平台托管)'
     )
+    
+    # 本地预装镜像名称（如 newserver:latest）- 设备上已有的镜像
+    local_image_name = models.CharField(max_length=255, blank=True, verbose_name='本地镜像名称(设备预装)')
     
     # 代码包（可选，用于代码热更新）
     code_package = models.ForeignKey(

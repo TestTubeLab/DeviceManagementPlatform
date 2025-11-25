@@ -14,6 +14,7 @@ export interface Project {
     tag: string
     full_name: string
   }
+  local_image_name: string  // 本地预装镜像名（如 newserver:latest）
   code_package: number | null
   code_package_info?: {
     id: number
@@ -27,7 +28,16 @@ export interface Project {
   work_dir: string
   start_command: string
   container_name: string
-  container_config: any
+  container_config: {
+    runtime?: string          // 'nvidia' 启用GPU
+    network_mode?: string     // 'host' 或空
+    privileged?: boolean      // 特权模式
+    restart_policy?: string   // 重启策略
+    ports?: Record<string, number>
+    environment?: Record<string, string>
+    volumes?: Record<string, string>
+    devices?: string[]
+  }
   configs?: ProjectConfig[]
   deployed_devices_count?: number
   created_by: string
