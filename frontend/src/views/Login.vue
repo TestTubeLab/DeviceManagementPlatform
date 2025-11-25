@@ -51,7 +51,7 @@
       </el-form>
       
       <div class="login-footer">
-        <p>默认账号: admin / admin123</p>
+        <p>设备管理平台 v1.0</p>
       </div>
     </div>
   </div>
