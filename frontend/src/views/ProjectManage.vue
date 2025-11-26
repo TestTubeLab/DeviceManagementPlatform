@@ -97,18 +97,6 @@
           <div class="form-tip">设备上已有的镜像，直接使用不拉取（推荐）</div>
         </el-form-item>
         
-        <el-form-item label="或选择平台镜像">
-          <el-select v-model="projectForm.docker_image" placeholder="从平台上传的镜像" clearable filterable>
-            <el-option
-              v-for="image in dockerImages"
-              :key="image.id"
-              :label="`${image.name}:${image.tag}`"
-              :value="image.id"
-            />
-          </el-select>
-          <div class="form-tip">平台托管的镜像（需要设备拉取，较慢）</div>
-        </el-form-item>
-        
         <el-form-item label="容器名称">
           <el-input v-model="projectForm.container_name" placeholder="如：middleware" />
         </el-form-item>
@@ -455,14 +443,12 @@ import {
   type ProjectConfig
 } from '@/api/project'
 import { getDevices } from '@/api/device'
-import { getImages } from '@/api/image'
 import { getCodePackages, uploadCodePackage, type CodePackage } from '@/api/codePackage'
 import dayjs from 'dayjs'
 
 const loading = ref(false)
 const projects = ref<Project[]>([])
 const devices = ref<any[]>([])
-const dockerImages = ref<any[]>([])
 const codePackages = ref<CodePackage[]>([])
 
 const showCreateDialog = ref(false)
@@ -573,15 +559,6 @@ const loadDevices = async () => {
     devices.value = data.results
   } catch (error) {
     console.error('加载设备列表失败:', error)
-  }
-}
-
-const loadDockerImages = async () => {
-  try {
-    const data = await getImages()
-    dockerImages.value = data.results
-  } catch (error) {
-    console.error('加载镜像列表失败:', error)
   }
 }
 
@@ -799,7 +776,6 @@ const handleDelete = async (project: Project) => {
 onMounted(() => {
   loadProjects()
   loadDevices()
-  loadDockerImages()
   loadCodePackages()
 })
 </script>
