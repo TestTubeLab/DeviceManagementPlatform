@@ -32,22 +32,10 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '设备详情', hidden: true }
       },
       {
-        path: 'images',
-        name: 'ImageRegistry',
-        component: () => import('@/views/ImageRegistry.vue'),
-        meta: { title: '镜像仓库', icon: 'Box' }
-      },
-      {
         path: 'projects',
         name: 'ProjectManage',
         component: () => import('@/views/ProjectManage.vue'),
         meta: { title: '项目管理', icon: 'FolderOpened' }
-      },
-      {
-        path: 'deploy',
-        name: 'DeployCenter',
-        component: () => import('@/views/DeployCenter.vue'),
-        meta: { title: '部署中心', icon: 'Upload' }
       },
       {
         path: 'tasks',

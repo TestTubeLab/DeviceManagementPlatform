@@ -43,7 +43,7 @@
             <el-icon><List /></el-icon>
           </div>
           <div class="stat-info">
-            <div class="stat-value">{{ taskStore.pendingTasksCount() }}</div>
+            <div class="stat-value">{{ pendingTaskCount }}</div>
             <div class="stat-label">进行中任务</div>
           </div>
         </el-card>
@@ -84,31 +84,38 @@
       </el-col>
     </el-row>
 
-    <!-- 最近任务 -->
+    <!-- 最近部署任务 -->
     <el-row :gutter="20" style="margin-top: 20px">
       <el-col :span="24">
         <el-card shadow="hover">
           <template #header>
-            <span class="card-title">最近任务</span>
+            <div class="card-header">
+              <span class="card-title">最近部署任务</span>
+              <el-button type="primary" link @click="$router.push('/tasks')">查看全部</el-button>
+            </div>
           </template>
-          <el-table :data="recentTasks" max-height="300">
+          <el-table :data="recentDeployments" max-height="300">
             <el-table-column prop="id" label="任务ID" width="80" />
-            <el-table-column label="设备" width="180">
+            <el-table-column label="项目" width="180">
               <template #default="{ row }">
-                {{ getDeviceName(row.device) }}
+                {{ row.project_info?.name || '-' }}
               </template>
             </el-table-column>
-            <el-table-column prop="target_version" label="目标版本" width="120" />
-            <el-table-column label="状态" width="120">
+            <el-table-column label="设备" width="160">
               <template #default="{ row }">
-                <el-tag :type="getTaskStatusType(row.status)">
-                  {{ row.status }}
+                {{ row.device_info?.name || row.device_info?.device_id || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="getStatusType(row.status)" size="small">
+                  {{ getStatusText(row.status) }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="进度" width="200">
+            <el-table-column label="进度" width="150">
               <template #default="{ row }">
-                <el-progress :percentage="row.progress" />
+                <el-progress :percentage="row.progress" :status="getProgressStatus(row.status)" :stroke-width="8" />
               </template>
             </el-table-column>
             <el-table-column prop="message" label="消息" show-overflow-tooltip />
@@ -118,6 +125,7 @@
               </template>
             </el-table-column>
           </el-table>
+          <el-empty v-if="recentDeployments.length === 0" description="暂无部署任务" />
         </el-card>
       </el-col>
     </el-row>
@@ -125,43 +133,61 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, onUnmounted } from 'vue'
 import { Check, Close, Clock, List } from '@element-plus/icons-vue'
 import { useDeviceStore } from '@/stores/device'
-import { useTaskStore } from '@/stores/task'
+import { getProjectDeployments, type ProjectDeployment } from '@/api/project'
 import StatusBadge from '@/components/StatusBadge.vue'
 import * as echarts from 'echarts'
 import dayjs from 'dayjs'
 
 const deviceStore = useDeviceStore()
-const taskStore = useTaskStore()
 
 const statusChart = ref<HTMLElement>()
+const recentDeployments = ref<ProjectDeployment[]>([])
 
 const recentDevices = computed(() => {
   return deviceStore.devices.slice(0, 5)
 })
 
-const recentTasks = computed(() => {
-  return taskStore.deploymentTasks.slice(0, 10)
+const pendingTaskCount = computed(() => {
+  return recentDeployments.value.filter(d => 
+    ['pending', 'pulling_image', 'pulling_code', 'configuring', 'starting'].includes(d.status)
+  ).length
 })
 
-const getDeviceName = (deviceId: number) => {
-  const device = deviceStore.devices.find(d => d.id === deviceId)
-  return device?.name || device?.device_id || `设备 ${deviceId}`
-}
-
-const getTaskStatusType = (status: string) => {
+const getStatusType = (status: string) => {
   const typeMap: Record<string, any> = {
     pending: 'info',
-    downloading: 'warning',
+    pulling_image: 'warning',
+    pulling_code: 'warning',
     configuring: 'warning',
     starting: 'warning',
-    checking: 'warning',
+    running: 'success',
     completed: 'success',
     failed: 'danger',
   }
   return typeMap[status] || 'info'
+}
+
+const getStatusText = (status: string) => {
+  const textMap: Record<string, string> = {
+    pending: '等待中',
+    pulling_image: '拉取镜像',
+    pulling_code: '下载代码',
+    configuring: '配置中',
+    starting: '启动中',
+    running: '运行中',
+    completed: '已完成',
+    failed: '失败',
+  }
+  return textMap[status] || status
+}
+
+const getProgressStatus = (status: string) => {
+  if (status === 'completed' || status === 'running') return 'success'
+  if (status === 'failed') return 'exception'
+  return undefined
 }
 
 const formatTime = (time: string | null) => {
@@ -173,6 +199,22 @@ const initStatusChart = () => {
   if (!statusChart.value) return
   
   const chart = echarts.init(statusChart.value)
+  
+  const statusLabels: Record<string, string> = {
+    online: '在线',
+    offline: '离线',
+    waiting: '待部署',
+    deploying: '部署中',
+    error: '异常'
+  }
+  
+  const statusColors: Record<string, string> = {
+    online: '#67c23a',
+    offline: '#909399',
+    waiting: '#409eff',
+    deploying: '#e6a23c',
+    error: '#f56c6c'
+  }
   
   const statusCount: Record<string, number> = {}
   deviceStore.devices.forEach(device => {
@@ -192,9 +234,12 @@ const initStatusChart = () => {
         name: '设备状态',
         type: 'pie',
         radius: '60%',
-        data: Object.entries(statusCount).map(([name, value]) => ({
-          name: name,
-          value: value
+        data: Object.entries(statusCount).map(([status, value]) => ({
+          name: statusLabels[status] || status,
+          value: value,
+          itemStyle: {
+            color: statusColors[status] || '#909399'
+          }
         })),
         emphasis: {
           itemStyle: {
@@ -210,20 +255,33 @@ const initStatusChart = () => {
   chart.setOption(option)
 }
 
+const loadDeployments = async () => {
+  try {
+    const res = await getProjectDeployments()
+    recentDeployments.value = (res.results || []).slice(0, 10)
+  } catch (error) {
+    console.error('加载部署任务失败:', error)
+  }
+}
+
 const loadData = async () => {
   await Promise.all([
     deviceStore.loadDevices(),
-    taskStore.loadDeploymentTasks(),
-    taskStore.loadUpdateTasks(),
+    loadDeployments()
   ])
   initStatusChart()
 }
 
+let refreshTimer: number
+
 onMounted(() => {
   loadData()
-  
   // 每30秒刷新一次
-  setInterval(loadData, 30000)
+  refreshTimer = setInterval(loadData, 30000)
+})
+
+onUnmounted(() => {
+  clearInterval(refreshTimer)
 })
 </script>
 
@@ -309,6 +367,10 @@ onMounted(() => {
   font-weight: 600;
   color: #303133;
 }
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
 </style>
-
-

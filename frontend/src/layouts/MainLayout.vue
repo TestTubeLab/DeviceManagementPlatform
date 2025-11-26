@@ -6,7 +6,7 @@
         <span class="title">设备管理平台</span>
       </div>
       <div class="header-right">
-        <el-badge :value="taskStore.pendingTasksCount()" class="item" :hidden="taskStore.pendingTasksCount() === 0">
+        <el-badge :value="pendingCount" class="item" :hidden="pendingCount === 0">
           <el-button :icon="Bell" circle @click="showNotifications = true" />
         </el-badge>
         <el-dropdown @command="handleCommand">
@@ -68,76 +68,56 @@
     </el-container>
     
     <!-- 消息通知抽屉 -->
-    <el-drawer v-model="showNotifications" title="消息通知" direction="rtl" size="400px">
-      <div v-if="taskStore.pendingTasksCount() === 0" class="empty-notifications">
+    <el-drawer v-model="showNotifications" title="待处理任务" direction="rtl" size="400px">
+      <div v-if="pendingCount === 0" class="empty-notifications">
         <el-empty description="暂无待处理任务" />
       </div>
       <div v-else class="notifications-list">
-        <div class="notification-section">
-          <h4>待部署任务 ({{ taskStore.deploymentTasks.filter(t => t.status === 'pending').length }})</h4>
-          <el-card 
-            v-for="task in taskStore.deploymentTasks.filter(t => t.status === 'pending')" 
-            :key="task.id"
-            shadow="hover"
-            class="notification-item"
-          >
-            <div class="task-info">
-              <div class="task-header">
-                <el-tag type="info">部署</el-tag>
-                <span class="task-device">{{ task.device_name }}</span>
-              </div>
-              <div class="task-detail">
-                <span>目标版本: {{ task.target_version }}</span>
-              </div>
-              <div class="task-time">
-                {{ formatTime(task.created_at) }}
-              </div>
+        <el-card 
+          v-for="task in pendingDeployments" 
+          :key="task.id"
+          shadow="hover"
+          class="notification-item"
+        >
+          <div class="task-info">
+            <div class="task-header">
+              <el-tag type="primary">项目部署</el-tag>
+              <span class="task-device">{{ task.device_info?.name || task.device_info?.device_id }}</span>
             </div>
-          </el-card>
-        </div>
-        
-        <div class="notification-section" v-if="taskStore.updateTasks.filter(t => t.status === 'pending').length > 0">
-          <h4>待更新任务 ({{ taskStore.updateTasks.filter(t => t.status === 'pending').length }})</h4>
-          <el-card 
-            v-for="task in taskStore.updateTasks.filter(t => t.status === 'pending')" 
-            :key="task.id"
-            shadow="hover"
-            class="notification-item"
-          >
-            <div class="task-info">
-              <div class="task-header">
-                <el-tag type="warning">更新</el-tag>
-                <span class="task-device">{{ task.device_name }}</span>
-              </div>
-              <div class="task-detail">
-                <span>{{ task.from_version }} → {{ task.target_version }}</span>
-              </div>
-              <div class="task-time">
-                {{ formatTime(task.created_at) }}
-              </div>
+            <div class="task-detail">
+              <span>{{ task.project_info?.name }} ({{ task.deployed_version }})</span>
             </div>
-          </el-card>
-        </div>
+            <div class="task-time">
+              {{ formatTime(task.created_at) }}
+            </div>
+          </div>
+        </el-card>
       </div>
+      <template #footer>
+        <el-button type="primary" @click="$router.push('/tasks'); showNotifications = false">
+          查看全部任务
+        </el-button>
+      </template>
     </el-drawer>
   </el-container>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Monitor, DataLine, List, Bell, User, FolderOpened, SwitchButton } from '@element-plus/icons-vue'
-import { useTaskStore } from '@/stores/task'
 import { logout, getStoredUser, clearAuth } from '@/api/auth'
+import { getProjectDeployments, type ProjectDeployment } from '@/api/project'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
 
 const route = useRoute()
 const router = useRouter()
-const taskStore = useTaskStore()
 const showNotifications = ref(false)
+const pendingDeployments = ref<ProjectDeployment[]>([])
 
 const currentRoute = computed(() => route.path)
+const pendingCount = computed(() => pendingDeployments.value.length)
 
 // 获取用户名
 const username = computed(() => {
@@ -147,6 +127,16 @@ const username = computed(() => {
 
 const formatTime = (time: string) => {
   return dayjs(time).format('MM-DD HH:mm')
+}
+
+// 加载待处理的部署任务
+const loadPendingDeployments = async () => {
+  try {
+    const res = await getProjectDeployments({ status: 'pending' })
+    pendingDeployments.value = res.results || []
+  } catch (error) {
+    console.error('加载待处理任务失败:', error)
+  }
 }
 
 // 处理下拉菜单命令
@@ -174,17 +164,18 @@ const handleCommand = async (command: string) => {
   }
 }
 
+let refreshTimer: number
+
 // 初始加载任务
 onMounted(() => {
-  taskStore.loadDeploymentTasks()
-  taskStore.loadUpdateTasks()
+  loadPendingDeployments()
+  // 定期刷新任务数量（30秒）
+  refreshTimer = setInterval(loadPendingDeployments, 30000)
 })
 
-// 定期刷新任务数量
-setInterval(() => {
-  taskStore.loadDeploymentTasks()
-  taskStore.loadUpdateTasks()
-}, 30000)
+onUnmounted(() => {
+  clearInterval(refreshTimer)
+})
 </script>
 
 <style scoped>
@@ -269,18 +260,11 @@ setInterval(() => {
 .notifications-list {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-}
-
-.notification-section h4 {
-  margin: 0 0 12px 0;
-  font-size: 14px;
-  color: #606266;
-  font-weight: 600;
+  gap: 12px;
 }
 
 .notification-item {
-  margin-bottom: 12px;
+  margin-bottom: 0;
 }
 
 .task-info {
@@ -310,4 +294,3 @@ setInterval(() => {
   color: #909399;
 }
 </style>
-

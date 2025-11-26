@@ -138,11 +138,24 @@ class ProjectDeploymentSerializer(serializers.ModelSerializer):
     device_name = serializers.CharField(source='device.device_id', read_only=True)
     # 完整项目信息（供Agent使用）
     project_info = serializers.SerializerMethodField()
+    # 设备信息（供前端显示）
+    device_info = serializers.SerializerMethodField()
     
     class Meta:
         model = ProjectDeployment
         fields = '__all__'
         read_only_fields = ['created_at', 'updated_at', 'completed_at', 'git_commit']
+    
+    def get_device_info(self, obj):
+        """返回设备基本信息"""
+        device = obj.device
+        return {
+            'id': device.id,
+            'device_id': device.device_id,
+            'name': device.name or device.device_id,
+            'ip_address': device.ip_address,
+            'status': device.status
+        }
     
     def get_project_info(self, obj):
         """返回完整的项目信息，包括镜像、代码包、配置等"""

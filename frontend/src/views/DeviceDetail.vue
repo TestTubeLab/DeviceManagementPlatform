@@ -116,44 +116,27 @@
           <span class="card-title">设备操作</span>
         </template>
         <el-space>
-          <el-button type="primary" :icon="Upload" @click="showDeployDialog = true">
-            部署/更新
-          </el-button>
-          <el-button :icon="Refresh" @click="handleRestart">重启服务</el-button>
+          <el-button type="primary" :icon="Refresh" @click="handleRestart">重启容器</el-button>
           <el-button :icon="Setting" disabled title="配置管理功能开发中">配置管理</el-button>
           <el-button :icon="Delete" type="danger" @click="handleDelete">删除设备</el-button>
         </el-space>
+        <el-alert
+          title="提示：部署项目请前往「项目管理」页面操作"
+          type="info"
+          :closable="false"
+          style="margin-top: 16px"
+        />
       </el-card>
     </div>
-
-    <!-- 部署对话框 -->
-    <el-dialog v-model="showDeployDialog" title="部署/更新设备" width="500px">
-      <el-form :model="deployForm" label-width="100px">
-        <el-form-item label="目标版本" required>
-          <el-input v-model="deployForm.target_version" placeholder="v1.0.4" />
-        </el-form-item>
-        <el-form-item label="Socket主机">
-          <el-input v-model="deployForm.reverse_socket_host" placeholder="192.168.31.29" />
-        </el-form-item>
-        <el-form-item label="Socket端口">
-          <el-input-number v-model="deployForm.reverse_socket_port" :min="1" :max="65535" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="showDeployDialog = false">取消</el-button>
-        <el-button type="primary" @click="deployDevice">确定</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Upload, Refresh, Setting, Delete } from '@element-plus/icons-vue'
+import { Refresh, Setting, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDeviceStore } from '@/stores/device'
-import { createDeploymentTask } from '@/api/task'
 import { restartDevice, deleteDevice, updateDevice } from '@/api/device'
 import { getProjects } from '@/api/project'
 import StatusBadge from '@/components/StatusBadge.vue'
@@ -162,13 +145,6 @@ import dayjs from 'dayjs'
 const route = useRoute()
 const router = useRouter()
 const deviceStore = useDeviceStore()
-
-const showDeployDialog = ref(false)
-const deployForm = ref({
-  target_version: '',
-  reverse_socket_host: '192.168.31.29',
-  reverse_socket_port: 9088,
-})
 
 const device = computed(() => deviceStore.currentDevice)
 const projects = ref<any[]>([])
@@ -191,28 +167,6 @@ const getProgressColor = (percentage: number) => {
   if (percentage < 60) return '#67c23a'
   if (percentage < 80) return '#e6a23c'
   return '#f56c6c'
-}
-
-const deployDevice = async () => {
-  if (!device.value || !deployForm.value.target_version) {
-    ElMessage.warning('请输入目标版本')
-    return
-  }
-
-  try {
-    await createDeploymentTask({
-      device: device.value.id,
-      target_version: deployForm.value.target_version,
-      config: {
-        reverse_socket_host: deployForm.value.reverse_socket_host,
-        reverse_socket_port: deployForm.value.reverse_socket_port,
-      },
-    })
-    ElMessage.success('部署任务创建成功')
-    showDeployDialog.value = false
-  } catch (error) {
-    ElMessage.error('部署任务创建失败')
-  }
 }
 
 const handleRestart = async () => {

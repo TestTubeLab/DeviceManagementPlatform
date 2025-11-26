@@ -57,9 +57,17 @@ export interface ProjectConfig {
 export interface ProjectDeployment {
   id: number
   project: number
-  project_name: string
+  project_info?: {
+    id: number
+    name: string
+    version: string
+  }
   device: number
-  device_name: string
+  device_info?: {
+    id: number
+    device_id: string
+    name: string
+  }
   status: string
   progress: number
   message: string
