@@ -126,8 +126,8 @@ class DeviceViewSet(viewsets.ModelViewSet):
         device.disk_usage = request.data.get('disk_usage', 0)
         device.last_heartbeat = timezone.now()
         
-        # 更新在线状态
-        if device.status == 'offline':
+        # 更新在线状态：只要有心跳，就是在线（除非正在部署/更新）
+        if device.status in ['offline', 'waiting']:
             device.status = 'online'
         
         device.save()
