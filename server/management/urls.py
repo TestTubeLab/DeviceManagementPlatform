@@ -25,3 +25,4 @@ urlpatterns = [
     path('auth/user/', views.user_info, name='user_info'),
 ]
 
+

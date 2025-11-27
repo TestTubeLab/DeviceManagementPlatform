@@ -209,3 +209,4 @@ class ProjectDeploymentSerializer(serializers.ModelSerializer):
             'configs': configs
         }
 
+
