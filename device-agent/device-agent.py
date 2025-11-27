@@ -796,6 +796,9 @@ def execute_project_deployment(deployment):
                 # 如果启动命令包含复杂脚本，用 bash -c 执行
                 if '&&' in start_command or '|' in start_command or ';' in start_command:
                     cmd.extend(["/bin/bash", "-c", start_command])
+                # 如果是 .sh 脚本，用 bash 执行（避免 ZIP 解压后可执行位丢失的问题）
+                elif start_command.strip().endswith('.sh'):
+                    cmd.extend(["/bin/bash", start_command.strip()])
                 else:
                     cmd.append(start_command)
             
