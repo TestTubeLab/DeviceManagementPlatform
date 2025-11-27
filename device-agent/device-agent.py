@@ -215,9 +215,11 @@ def execute_deployment(task):
     image_info = task.get('image_info', {})
     container_name = task.get('container_name', 'middleware')
     container_config = task.get('container_config', {})
+    config = task.get('config', {})
     
     # 如果是重启任务，执行简单的容器重启
-    if task_type == 'restart':
+    # 支持两种方式：task_type='restart' 或 config.action='restart_container'
+    if task_type == 'restart' or config.get('action') == 'restart_container':
         return execute_restart(task_id, container_name)
     
     logger.info(f"开始执行部署任务 #{task_id}")
