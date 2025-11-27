@@ -134,12 +134,18 @@ class ProjectSerializer(serializers.ModelSerializer):
 
 class ProjectDeploymentSerializer(serializers.ModelSerializer):
     """项目部署序列化器"""
-    project_name = serializers.CharField(source='project.name', read_only=True)
+    project_name = serializers.SerializerMethodField()
     device_name = serializers.CharField(source='device.device_id', read_only=True)
     # 完整项目信息（供Agent使用）
     project_info = serializers.SerializerMethodField()
     # 设备信息（供前端显示）
     device_info = serializers.SerializerMethodField()
+    
+    def get_project_name(self, obj):
+        """返回项目名称，处理 null 情况"""
+        if obj.project:
+            return obj.project.name
+        return None
     
     class Meta:
         model = ProjectDeployment
@@ -160,6 +166,10 @@ class ProjectDeploymentSerializer(serializers.ModelSerializer):
     def get_project_info(self, obj):
         """返回完整的项目信息，包括镜像、代码包、配置等"""
         project = obj.project
+        
+        # 如果没有关联项目（如重启任务），返回 None
+        if not project:
+            return None
         
         # 获取Docker镜像信息
         docker_image_info = None

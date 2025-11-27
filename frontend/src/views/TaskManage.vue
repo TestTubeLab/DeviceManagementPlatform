@@ -12,10 +12,20 @@
 
       <el-table :data="deployments" v-loading="loading" style="width: 100%">
         <el-table-column prop="id" label="任务ID" width="80" />
-        <el-table-column label="项目" width="180">
+        <el-table-column label="类型" width="80">
           <template #default="{ row }">
-            <span>{{ row.project_info?.name || '-' }}</span>
-            <el-tag size="small" style="margin-left: 8px">{{ row.deployed_version }}</el-tag>
+            <el-tag :type="row.task_type === 'restart' ? 'warning' : 'primary'" size="small">
+              {{ row.task_type === 'restart' ? '重启' : '部署' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="项目" width="150">
+          <template #default="{ row }">
+            <span v-if="row.project_info?.name">{{ row.project_info.name }}</span>
+            <span v-else style="color: #909399">-</span>
+            <el-tag v-if="row.deployed_version && row.task_type !== 'restart'" size="small" style="margin-left: 8px">
+              {{ row.deployed_version }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="设备" width="160">
@@ -65,8 +75,13 @@
     <el-dialog v-model="showDetailDialog" title="任务详情" width="600px">
       <el-descriptions v-if="currentDeployment" :column="1" border>
         <el-descriptions-item label="任务ID">{{ currentDeployment.id }}</el-descriptions-item>
+        <el-descriptions-item label="任务类型">
+          <el-tag :type="currentDeployment.task_type === 'restart' ? 'warning' : 'primary'">
+            {{ currentDeployment.task_type === 'restart' ? '重启' : '部署' }}
+          </el-tag>
+        </el-descriptions-item>
         <el-descriptions-item label="项目">
-          {{ currentDeployment.project_info?.name }}
+          {{ currentDeployment.project_info?.name || '-' }}
         </el-descriptions-item>
         <el-descriptions-item label="设备">
           {{ currentDeployment.device_info?.name || currentDeployment.device_info?.device_id }}

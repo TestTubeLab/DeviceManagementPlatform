@@ -41,6 +41,7 @@ def register_device():
     """注册设备到云端服务器"""
     import socket
     import uuid
+    import hashlib
     
     try:
         logger.info("正在注册设备...")
@@ -55,8 +56,9 @@ def register_device():
         mac = ':'.join(['{:02x}'.format((uuid.getnode() >> ele) & 0xff) 
                        for ele in range(0, 48, 8)][::-1])
         
-        # 生成设备ID
-        device_id = f"DEV-{uuid.uuid4().hex[:8]}"
+        # 基于MAC地址生成确定性的设备ID（同一设备每次注册都得到相同ID）
+        mac_hash = hashlib.md5(mac.encode()).hexdigest()[:8]
+        device_id = f"DEV-{mac_hash}"
         
         # 获取主机名
         hostname = socket.gethostname()
@@ -599,13 +601,88 @@ def download_and_extract_code_package(code_package_info, target_dir):
     return True
 
 
-def execute_project_deployment(deployment):
-    """执行项目部署（支持代码包 + 本地镜像）"""
+def execute_project_restart(deployment):
+    """执行项目重启任务（ProjectDeployment 类型）"""
     deployment_id = deployment['id']
     project = deployment.get('project_info') or deployment.get('project')
     
+    # 获取容器名称
+    container_name = 'middleware'  # 默认值
+    if project:
+        container_name = project.get('container_name', container_name)
+    
+    logger.info(f"开始执行重启任务 #{deployment_id}")
+    logger.info(f"容器名称: {container_name}")
+    
+    try:
+        # 步骤1：更新状态
+        report_project_deployment_progress(deployment_id, status="starting", progress=30, 
+                                           message="正在重启容器...")
+        
+        # 步骤2：重启容器
+        logger.info(f"重启容器: {container_name}")
+        result = subprocess.run(
+            ["docker", "restart", container_name],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode != 0:
+            raise Exception(f"容器重启失败: {result.stderr}")
+        
+        logger.info("容器重启成功")
+        report_project_deployment_progress(deployment_id, status="running", progress=70,
+                                           message="等待容器就绪...")
+        
+        # 步骤3：等待容器运行
+        time.sleep(5)
+        
+        # 步骤4：检查容器状态
+        check_result = subprocess.run(
+            ["docker", "ps", "--filter", f"name={container_name}", "--format", "{{.Status}}"],
+            capture_output=True,
+            text=True
+        )
+        
+        if "Up" not in check_result.stdout:
+            raise Exception("容器未能正常运行")
+        
+        # 步骤5：上报成功
+        logger.info(f"重启成功: {container_name}")
+        report_project_deployment_progress(deployment_id, status="completed", progress=100,
+                                           message="重启成功")
+        return True
+        
+    except subprocess.TimeoutExpired:
+        error_msg = "重启操作超时"
+        logger.error(f"重启失败: {error_msg}")
+        report_project_deployment_progress(deployment_id, status="failed", progress=0, 
+                                           error_message=error_msg)
+        return False
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"重启失败: {error_msg}")
+        report_project_deployment_progress(deployment_id, status="failed", progress=0,
+                                           error_message=error_msg)
+        return False
+
+
+def execute_project_deployment(deployment):
+    """执行项目部署（支持代码包 + 本地镜像 + 重启）"""
+    deployment_id = deployment['id']
+    task_type = deployment.get('task_type', 'deploy')
+    project = deployment.get('project_info') or deployment.get('project')
+    
+    # ========== 处理重启任务 ==========
+    if task_type == 'restart':
+        return execute_project_restart(deployment)
+    
+    # ========== 处理部署任务 ==========
     if not project:
         logger.error(f"部署任务 #{deployment_id} 缺少项目信息")
+        report_project_deployment_progress(deployment_id, status="failed", progress=0,
+                                           error_message="缺少项目信息")
         return False
     
     project_name = project.get('name')

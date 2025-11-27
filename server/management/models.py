@@ -289,8 +289,14 @@ class ProjectDeployment(models.Model):
         ('failed', '失败'),
     ]
     
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, verbose_name='项目')
+    TASK_TYPE_CHOICES = [
+        ('deploy', '部署'),
+        ('restart', '重启'),
+    ]
+    
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, verbose_name='项目', null=True, blank=True)
     device = models.ForeignKey(Device, on_delete=models.CASCADE, verbose_name='设备')
+    task_type = models.CharField(max_length=20, choices=TASK_TYPE_CHOICES, default='deploy', verbose_name='任务类型')
     
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name='状态')
     progress = models.IntegerField(default=0, verbose_name='进度(%)')

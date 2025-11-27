@@ -250,21 +250,36 @@ class DeviceViewSet(viewsets.ModelViewSet):
         """
         重启设备服务
         POST /api/devices/{device_id}/restart/
+        创建一个 ProjectDeployment 任务，task_type='restart'
         """
         device = self.get_object()
         
-        # 创建一个重启任务
-        task = DeploymentTask.objects.create(
+        # 获取容器名称（优先从最近部署的项目获取）
+        container_name = 'middleware'  # 默认值
+        last_deployment = ProjectDeployment.objects.filter(
+            device=device, 
+            task_type='deploy',
+            status='completed'
+        ).order_by('-created_at').first()
+        
+        if last_deployment and last_deployment.project:
+            container_name = last_deployment.project.container_name or container_name
+        
+        # 创建重启任务（使用 ProjectDeployment 统一管理）
+        task = ProjectDeployment.objects.create(
             device=device,
-            target_version=device.current_version or 'restart',
+            project=last_deployment.project if last_deployment else None,
+            task_type='restart',
+            deployed_version=device.current_version or 'restart',
             status='pending',
-            config={'action': 'restart_container'}
+            message=f'重启容器: {container_name}'
         )
         
         return Response({
             "status": "success",
             "message": "重启任务已创建",
-            "task_id": task.id
+            "task_id": task.id,
+            "task_type": "restart"
         })
     
     def destroy(self, request, *args, **kwargs):
@@ -286,6 +301,25 @@ class DeploymentTaskViewSet(viewsets.ModelViewSet):
     """部署任务API"""
     queryset = DeploymentTask.objects.all()
     serializer_class = DeploymentTaskSerializer
+    
+    def get_permissions(self):
+        """Agent调用的接口不需要认证"""
+        if self.action in ['list', 'retrieve', 'update_progress']:
+            return [AllowAny()]
+        return super().get_permissions()
+    
+    def get_queryset(self):
+        """支持按设备和状态过滤"""
+        queryset = super().get_queryset()
+        device = self.request.query_params.get('device')
+        status = self.request.query_params.get('status')
+        
+        if device:
+            queryset = queryset.filter(device_id=device)
+        if status:
+            queryset = queryset.filter(status=status)
+        
+        return queryset.order_by('-created_at')
     
     @action(detail=True, methods=['post'], permission_classes=[AllowAny])
     def update_progress(self, request, pk=None):
