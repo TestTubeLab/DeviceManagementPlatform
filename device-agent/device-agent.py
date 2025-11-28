@@ -33,9 +33,9 @@ logger = logging.getLogger(__name__)
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
-HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "30"))  # 心跳间隔（秒）
-TASK_POLL_INTERVAL = int(os.getenv("TASK_POLL_INTERVAL", "10"))  # 任务轮询间隔（秒）
-LOG_UPLOAD_INTERVAL = int(os.getenv("LOG_UPLOAD_INTERVAL", "60"))  # 日志上传间隔（秒）
+HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "10"))  # 心跳间隔（秒）
+TASK_POLL_INTERVAL = int(os.getenv("TASK_POLL_INTERVAL", "5"))   # 任务轮询间隔（秒）
+LOG_UPLOAD_INTERVAL = int(os.getenv("LOG_UPLOAD_INTERVAL", "30")) # 日志上传间隔（秒）
 
 # ==================== 设备注册 ====================
 def register_device():
