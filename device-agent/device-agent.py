@@ -249,7 +249,7 @@ def send_heartbeat():
     
     # 检查服务健康（只有容器运行时才检查）
     if container_info["container_status"] == "running":
-        health_info = check_service_health("http://localhost:8000/api/")
+        health_info = check_service_health("http://localhost:8000/api/metrics")
     else:
         health_info = {
             "service_status": "unknown",
