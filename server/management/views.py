@@ -33,7 +33,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         """Agent 调用的接口不需要认证"""
-        if self.action in ['register', 'heartbeat', 'retrieve', 'list']:
+        if self.action in ['register', 'heartbeat', 'retrieve', 'list', 'upload_logs']:
             return [AllowAny()]
         return [IsAuthenticated()]
     
