@@ -127,6 +127,32 @@ class Device(models.Model):
     memory_usage = models.FloatField(default=0, verbose_name='内存使用率')
     disk_usage = models.FloatField(default=0, verbose_name='磁盘使用率')
     
+    # 服务监控信息
+    CONTAINER_STATUS_CHOICES = [
+        ('running', '运行中'),
+        ('stopped', '已停止'),
+        ('not_found', '未找到'),
+        ('error', '异常'),
+    ]
+    SERVICE_STATUS_CHOICES = [
+        ('healthy', '健康'),
+        ('unhealthy', '不健康'),
+        ('unknown', '未知'),
+    ]
+    container_status = models.CharField(
+        max_length=20, choices=CONTAINER_STATUS_CHOICES, default='not_found', verbose_name='容器状态'
+    )
+    container_name = models.CharField(max_length=100, blank=True, default='middleware', verbose_name='容器名称')
+    container_uptime = models.CharField(max_length=100, blank=True, verbose_name='容器运行时长')
+    service_status = models.CharField(
+        max_length=20, choices=SERVICE_STATUS_CHOICES, default='unknown', verbose_name='服务状态'
+    )
+    service_response_time = models.IntegerField(default=0, verbose_name='服务响应时间(ms)')
+    health_check_url = models.CharField(
+        max_length=200, blank=True, default='http://localhost:8000/api/', verbose_name='健康检查URL'
+    )
+    last_health_check = models.DateTimeField(null=True, blank=True, verbose_name='最后健康检查时间')
+    
     # 配置信息（JSON字段，存储设备特定配置）
     config = models.JSONField(default=dict, verbose_name='设备配置')
     

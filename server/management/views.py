@@ -114,7 +114,12 @@ class DeviceViewSet(viewsets.ModelViewSet):
             "version": "v1.0.3",
             "cpu_usage": 45.2,
             "memory_usage": 62.5,
-            "disk_usage": 38.7
+            "disk_usage": 38.7,
+            "container_status": "running",
+            "container_name": "middleware",
+            "container_uptime": "2小时 30分钟",
+            "service_status": "healthy",
+            "service_response_time": 23
         }
         """
         device = self.get_object()
@@ -125,6 +130,14 @@ class DeviceViewSet(viewsets.ModelViewSet):
         device.memory_usage = request.data.get('memory_usage', 0)
         device.disk_usage = request.data.get('disk_usage', 0)
         device.last_heartbeat = timezone.now()
+        
+        # 更新容器和服务状态
+        device.container_status = request.data.get('container_status', device.container_status)
+        device.container_name = request.data.get('container_name', device.container_name)
+        device.container_uptime = request.data.get('container_uptime', device.container_uptime)
+        device.service_status = request.data.get('service_status', device.service_status)
+        device.service_response_time = request.data.get('service_response_time', device.service_response_time)
+        device.last_health_check = timezone.now()
         
         # 更新在线状态：只要有心跳，就是在线（除非正在部署/更新）
         if device.status in ['offline', 'waiting']:

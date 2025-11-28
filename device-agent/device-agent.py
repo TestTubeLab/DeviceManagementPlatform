@@ -134,6 +134,109 @@ def collect_metrics():
         "disk_usage": round(disk.percent, 2),
     }
 
+# ==================== 容器和服务状态监控 ====================
+def collect_container_status(container_name="middleware"):
+    """收集容器状态"""
+    try:
+        # 检查容器是否存在和运行
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Status}}|{{.State.StartedAt}}", container_name],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            return {
+                "container_status": "not_found",
+                "container_name": container_name,
+                "container_uptime": ""
+            }
+        
+        output = result.stdout.strip()
+        parts = output.split("|")
+        status = parts[0] if parts else "unknown"
+        started_at = parts[1] if len(parts) > 1 else ""
+        
+        # 计算运行时长
+        uptime = ""
+        if status == "running" and started_at:
+            try:
+                from datetime import datetime
+                # 解析 Docker 时间格式
+                started = datetime.fromisoformat(started_at.replace("Z", "+00:00").split(".")[0])
+                now = datetime.now(started.tzinfo) if started.tzinfo else datetime.now()
+                delta = now - started.replace(tzinfo=None)
+                
+                days = delta.days
+                hours, remainder = divmod(delta.seconds, 3600)
+                minutes, _ = divmod(remainder, 60)
+                
+                if days > 0:
+                    uptime = f"{days}天 {hours}小时"
+                elif hours > 0:
+                    uptime = f"{hours}小时 {minutes}分钟"
+                else:
+                    uptime = f"{minutes}分钟"
+            except Exception as e:
+                logger.debug(f"计算运行时长失败: {e}")
+                uptime = "运行中"
+        
+        return {
+            "container_status": "running" if status == "running" else "stopped",
+            "container_name": container_name,
+            "container_uptime": uptime
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "container_status": "error",
+            "container_name": container_name,
+            "container_uptime": ""
+        }
+    except Exception as e:
+        logger.error(f"获取容器状态失败: {e}")
+        return {
+            "container_status": "error",
+            "container_name": container_name,
+            "container_uptime": ""
+        }
+
+def check_service_health(health_url="http://localhost:8000/api/"):
+    """检查服务健康状态"""
+    import time
+    
+    try:
+        start_time = time.time()
+        resp = requests.get(health_url, timeout=5)
+        response_time = int((time.time() - start_time) * 1000)  # 转为毫秒
+        
+        if resp.status_code < 500:  # 2xx, 3xx, 4xx 都认为服务是活着的
+            return {
+                "service_status": "healthy",
+                "service_response_time": response_time
+            }
+        else:
+            return {
+                "service_status": "unhealthy",
+                "service_response_time": response_time
+            }
+    except requests.exceptions.Timeout:
+        return {
+            "service_status": "unhealthy",
+            "service_response_time": 5000
+        }
+    except requests.exceptions.ConnectionError:
+        return {
+            "service_status": "unhealthy",
+            "service_response_time": 0
+        }
+    except Exception as e:
+        logger.debug(f"健康检查失败: {e}")
+        return {
+            "service_status": "unknown",
+            "service_response_time": 0
+        }
+
 # ==================== 心跳上报 ====================
 def send_heartbeat():
     """发送心跳，并获取待执行的命令"""
@@ -141,9 +244,23 @@ def send_heartbeat():
     version = get_current_version()
     metrics = collect_metrics()
     
+    # 收集容器状态
+    container_info = collect_container_status("middleware")
+    
+    # 检查服务健康（只有容器运行时才检查）
+    if container_info["container_status"] == "running":
+        health_info = check_service_health("http://localhost:8000/api/")
+    else:
+        health_info = {
+            "service_status": "unknown",
+            "service_response_time": 0
+        }
+    
     data = {
         "version": version,
-        **metrics
+        **metrics,
+        **container_info,
+        **health_info
     }
     
     try:

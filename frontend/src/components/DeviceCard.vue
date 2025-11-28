@@ -17,6 +17,13 @@
     
     <div class="card-body">
       <div class="info-row">
+        <span class="label">服务状态:</span>
+        <span class="value">
+          <span class="service-indicator" :class="serviceStatusClass"></span>
+          {{ serviceStatusText }}
+        </span>
+      </div>
+      <div class="info-row">
         <span class="label">IP地址:</span>
         <span class="value">{{ device.ip_address || '-' }}</span>
       </div>
@@ -79,6 +86,20 @@ const statusClass = computed(() => {
 const heartbeatText = computed(() => {
   if (!props.device.last_heartbeat) return '从未上线'
   return dayjs(props.device.last_heartbeat).fromNow()
+})
+
+const serviceStatusClass = computed(() => {
+  const status = props.device.service_status || 'unknown'
+  return `service-${status}`
+})
+
+const serviceStatusText = computed(() => {
+  const map: Record<string, string> = {
+    healthy: '健康',
+    unhealthy: '异常',
+    unknown: '未知'
+  }
+  return map[props.device.service_status] || '未知'
 })
 </script>
 
@@ -184,6 +205,53 @@ const heartbeatText = computed(() => {
   font-size: 12px;
   color: #606266;
   text-align: right;
+}
+
+/* 服务状态指示器 */
+.service-indicator {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  animation: pulse 2s infinite;
+}
+
+.service-healthy {
+  background-color: #67c23a;
+  box-shadow: 0 0 6px #67c23a;
+}
+
+.service-unhealthy {
+  background-color: #f56c6c;
+  box-shadow: 0 0 6px #f56c6c;
+  animation: pulse-danger 1s infinite;
+}
+
+.service-unknown {
+  background-color: #909399;
+  box-shadow: none;
+  animation: none;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes pulse-danger {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scale(1.2);
+  }
 }
 </style>
 

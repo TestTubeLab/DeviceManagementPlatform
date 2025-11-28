@@ -94,6 +94,70 @@
           />
         </el-form>
       </el-card>
+      
+      <!-- 服务状态 -->
+      <el-card shadow="hover" class="info-card" style="margin-top: 20px">
+        <template #header>
+          <div class="card-header-content">
+            <span class="card-title">服务状态</span>
+            <el-tag 
+              :type="getServiceTagType(device.service_status)" 
+              size="large"
+              effect="dark"
+            >
+              {{ getServiceStatusText(device.service_status) }}
+            </el-tag>
+          </div>
+        </template>
+        <el-row :gutter="20">
+          <el-col :span="8">
+            <div class="status-item">
+              <div class="status-label">容器状态</div>
+              <div class="status-value">
+                <el-tag :type="getContainerTagType(device.container_status)" size="small">
+                  {{ getContainerStatusText(device.container_status) }}
+                </el-tag>
+              </div>
+            </div>
+          </el-col>
+          <el-col :span="8">
+            <div class="status-item">
+              <div class="status-label">容器名称</div>
+              <div class="status-value">{{ device.container_name || 'middleware' }}</div>
+            </div>
+          </el-col>
+          <el-col :span="8">
+            <div class="status-item">
+              <div class="status-label">运行时长</div>
+              <div class="status-value">{{ device.container_uptime || '-' }}</div>
+            </div>
+          </el-col>
+        </el-row>
+        <el-row :gutter="20" style="margin-top: 16px">
+          <el-col :span="8">
+            <div class="status-item">
+              <div class="status-label">响应时间</div>
+              <div class="status-value">
+                <span :class="getResponseTimeClass(device.service_response_time)">
+                  {{ device.service_response_time }}ms
+                </span>
+              </div>
+            </div>
+          </el-col>
+          <el-col :span="8">
+            <div class="status-item">
+              <div class="status-label">健康检查URL</div>
+              <div class="status-value" style="font-size: 12px">{{ device.health_check_url || '-' }}</div>
+            </div>
+          </el-col>
+          <el-col :span="8">
+            <div class="status-item">
+              <div class="status-label">最后检查</div>
+              <div class="status-value">{{ device.last_health_check ? formatTime(device.last_health_check) : '-' }}</div>
+            </div>
+          </el-col>
+        </el-row>
+      </el-card>
 
       <!-- 资源使用情况 -->
       <el-row :gutter="20" style="margin-top: 20px">
@@ -259,6 +323,52 @@ const getProgressColor = (percentage: number) => {
   return '#f56c6c'
 }
 
+// 服务状态相关
+const getServiceTagType = (status: string) => {
+  const map: Record<string, string> = {
+    healthy: 'success',
+    unhealthy: 'danger',
+    unknown: 'info'
+  }
+  return map[status] || 'info'
+}
+
+const getServiceStatusText = (status: string) => {
+  const map: Record<string, string> = {
+    healthy: '服务健康',
+    unhealthy: '服务异常',
+    unknown: '状态未知'
+  }
+  return map[status] || '未知'
+}
+
+const getContainerTagType = (status: string) => {
+  const map: Record<string, string> = {
+    running: 'success',
+    stopped: 'danger',
+    not_found: 'warning',
+    error: 'danger'
+  }
+  return map[status] || 'info'
+}
+
+const getContainerStatusText = (status: string) => {
+  const map: Record<string, string> = {
+    running: '运行中',
+    stopped: '已停止',
+    not_found: '未找到',
+    error: '异常'
+  }
+  return map[status] || '未知'
+}
+
+const getResponseTimeClass = (time: number) => {
+  if (time === 0) return 'response-unknown'
+  if (time < 100) return 'response-fast'
+  if (time < 500) return 'response-normal'
+  return 'response-slow'
+}
+
 const getLogClass = (level: string) => {
   return `log-${level.toLowerCase()}`
 }
@@ -405,6 +515,42 @@ onMounted(() => {
   font-size: 16px;
   font-weight: 600;
   color: #303133;
+}
+
+/* 服务状态样式 */
+.status-item {
+  text-align: center;
+  padding: 12px;
+  background: #f5f7fa;
+  border-radius: 8px;
+}
+
+.status-label {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 8px;
+}
+
+.status-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.response-fast {
+  color: #67c23a;
+}
+
+.response-normal {
+  color: #e6a23c;
+}
+
+.response-slow {
+  color: #f56c6c;
+}
+
+.response-unknown {
+  color: #909399;
 }
 
 /* 日志样式 */

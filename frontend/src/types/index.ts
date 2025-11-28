@@ -1,6 +1,12 @@
 // 设备状态类型
 export type DeviceStatus = 'waiting' | 'deploying' | 'online' | 'offline' | 'updating' | 'error'
 
+// 容器状态类型
+export type ContainerStatus = 'running' | 'stopped' | 'not_found' | 'error'
+
+// 服务状态类型
+export type ServiceStatus = 'healthy' | 'unhealthy' | 'unknown'
+
 // 设备信息
 export interface Device {
   id: number
@@ -15,6 +21,14 @@ export interface Device {
   cpu_usage: number
   memory_usage: number
   disk_usage: number
+  // 服务监控信息
+  container_status: ContainerStatus
+  container_name: string
+  container_uptime: string
+  service_status: ServiceStatus
+  service_response_time: number
+  health_check_url: string
+  last_health_check: string | null
   config: Record<string, any>
   created_at: string
   updated_at: string
