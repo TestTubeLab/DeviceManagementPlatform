@@ -59,3 +59,8 @@ export const restartDevice = (deviceId: string) => {
   return request.post(`/devices/${deviceId}/restart/`)
 }
 
+// 获取容器日志
+export const getContainerLogs = (deviceId: string) => {
+  return request.get<any, { device_id: string, logs: Array<{level: string, message: string, timestamp: string}> }>(`/devices/${deviceId}/container_logs/`)
+}
+

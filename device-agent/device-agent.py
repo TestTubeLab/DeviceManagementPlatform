@@ -35,6 +35,7 @@ DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "30"))  # 心跳间隔（秒）
 TASK_POLL_INTERVAL = int(os.getenv("TASK_POLL_INTERVAL", "10"))  # 任务轮询间隔（秒）
+LOG_UPLOAD_INTERVAL = int(os.getenv("LOG_UPLOAD_INTERVAL", "60"))  # 日志上传间隔（秒）
 
 # ==================== 设备注册 ====================
 def register_device():
@@ -169,6 +170,54 @@ def send_heartbeat():
     except Exception as e:
         logger.error(f"心跳失败: {e}")
         return {"command": "none"}
+
+# ==================== 容器日志收集与上传 ====================
+def collect_container_logs(container_name="middleware", lines=100):
+    """收集容器日志"""
+    try:
+        result = subprocess.run(
+            ["docker", "logs", "--tail", str(lines), container_name],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        # 合并 stdout 和 stderr
+        logs = result.stdout + result.stderr
+        return logs.strip() if logs else ""
+    except subprocess.TimeoutExpired:
+        logger.warning(f"收集容器日志超时: {container_name}")
+        return ""
+    except Exception as e:
+        logger.error(f"收集容器日志失败: {e}")
+        return ""
+
+def upload_container_logs(container_name="middleware"):
+    """上传容器日志到服务器"""
+    device_id = get_device_id()
+    logs = collect_container_logs(container_name)
+    
+    if not logs:
+        return False
+    
+    try:
+        resp = requests.post(
+            f"{CLOUD_SERVER}/devices/{device_id}/upload_logs/",
+            json={
+                "logs": logs,
+                "container_name": container_name
+            },
+            timeout=30
+        )
+        
+        if resp.status_code == 200:
+            logger.debug("容器日志上传成功")
+            return True
+        else:
+            logger.warning(f"日志上传失败: {resp.status_code}")
+            return False
+    except Exception as e:
+        logger.error(f"日志上传失败: {e}")
+        return False
 
 # ==================== 轮询部署任务 ====================
 def poll_deployment_tasks():
@@ -955,10 +1004,12 @@ def main():
     logger.info(f"云端服务器: {CLOUD_SERVER}")
     logger.info(f"心跳间隔: {HEARTBEAT_INTERVAL}秒")
     logger.info(f"任务轮询间隔: {TASK_POLL_INTERVAL}秒")
+    logger.info(f"日志上传间隔: {LOG_UPLOAD_INTERVAL}秒")
     logger.info("=" * 60)
     
     last_heartbeat = 0
     last_task_poll = 0
+    last_log_upload = 0
     
     while True:
         try:
@@ -994,6 +1045,12 @@ def main():
                     execute_project_deployment(deployment)
                 
                 last_task_poll = current_time
+            
+            # 定时上传容器日志
+            if current_time - last_log_upload >= LOG_UPLOAD_INTERVAL:
+                logger.debug("上传容器日志...")
+                upload_container_logs("middleware")
+                last_log_upload = current_time
             
             # 短暂休眠，避免CPU占用过高
             time.sleep(1)

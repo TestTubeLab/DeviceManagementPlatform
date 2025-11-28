@@ -295,6 +295,71 @@ class DeviceViewSet(viewsets.ModelViewSet):
             "status": "success",
             "message": f"设备 {device_id} 已删除"
         })
+    
+    @action(detail=True, methods=['get'])
+    def container_logs(self, request, device_id=None):
+        """
+        获取设备容器日志
+        GET /api/devices/{device_id}/container_logs/
+        """
+        device = self.get_object()
+        
+        # 获取最近的日志记录
+        logs = DeviceLog.objects.filter(device=device).order_by('-timestamp')[:100]
+        
+        return Response({
+            "device_id": device.device_id,
+            "logs": [
+                {
+                    "level": log.level,
+                    "message": log.message,
+                    "timestamp": log.timestamp.isoformat()
+                }
+                for log in logs
+            ]
+        })
+    
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
+    def upload_logs(self, request, device_id=None):
+        """
+        上传容器日志（Agent调用）
+        POST /api/devices/{device_id}/upload_logs/
+        Body: {
+            "logs": "日志内容",
+            "container_name": "middleware"
+        }
+        """
+        device = self.get_object()
+        logs_content = request.data.get('logs', '')
+        container_name = request.data.get('container_name', 'middleware')
+        
+        if logs_content:
+            # 解析日志内容，按行存储
+            lines = logs_content.strip().split('\n')[-100:]  # 只保留最后100行
+            
+            # 清除旧日志（保留最近500条）
+            old_logs = DeviceLog.objects.filter(device=device).order_by('-timestamp')[500:]
+            DeviceLog.objects.filter(id__in=[l.id for l in old_logs]).delete()
+            
+            # 存储新日志
+            for line in lines:
+                if line.strip():
+                    # 简单判断日志级别
+                    level = 'INFO'
+                    if '[ERROR]' in line or 'ERROR' in line:
+                        level = 'ERROR'
+                    elif '[WARNING]' in line or 'WARNING' in line:
+                        level = 'WARNING'
+                    elif '[DEBUG]' in line:
+                        level = 'DEBUG'
+                    
+                    DeviceLog.objects.create(
+                        device=device,
+                        level=level,
+                        message=line.strip()
+                    )
+        
+        return Response({"status": "success", "message": "日志已上传"})
 
 
 class DeploymentTaskViewSet(viewsets.ModelViewSet):
