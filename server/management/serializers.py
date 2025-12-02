@@ -10,12 +10,26 @@ from .models import (
 
 class DeviceSerializer(serializers.ModelSerializer):
     """设备序列化器"""
-    is_online = serializers.BooleanField(read_only=True)
+    is_online = serializers.SerializerMethodField()
+    computed_status = serializers.SerializerMethodField()
+    computed_service_status = serializers.SerializerMethodField()
     
     class Meta:
         model = Device
         fields = '__all__'
         read_only_fields = ['created_at', 'updated_at', 'last_heartbeat']
+    
+    def get_is_online(self, obj):
+        """动态计算是否在线（2分钟内有心跳）"""
+        return obj.is_online
+    
+    def get_computed_status(self, obj):
+        """动态计算设备状态"""
+        return obj.computed_status
+    
+    def get_computed_service_status(self, obj):
+        """动态计算服务状态"""
+        return obj.computed_service_status
 
 
 class DeploymentTaskSerializer(serializers.ModelSerializer):

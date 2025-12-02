@@ -14,7 +14,7 @@
             <span class="card-title">基本信息</span>
             <div>
               <el-button type="primary" link :icon="Edit" @click="showEditDialog = true">编辑</el-button>
-              <StatusBadge :status="device.status" style="margin-left: 12px" />
+              <StatusBadge :status="device.computed_status || device.status" style="margin-left: 12px" />
             </div>
           </div>
         </template>
@@ -30,7 +30,13 @@
           <el-descriptions-item label="当前版本">{{ device.current_version || '-' }}</el-descriptions-item>
           <el-descriptions-item label="设备分组">{{ device.group || '-' }}</el-descriptions-item>
           <el-descriptions-item label="最后心跳">
-            {{ device.last_heartbeat ? formatTime(device.last_heartbeat) : '从未上线' }}
+            <span v-if="device.last_heartbeat">
+              {{ formatTime(device.last_heartbeat) }}
+              <el-tag v-if="!device.is_online" type="danger" size="small" style="margin-left: 8px">
+                已离线
+              </el-tag>
+            </span>
+            <span v-else style="color: #909399">从未上线</span>
           </el-descriptions-item>
           <el-descriptions-item label="创建时间">{{ formatTime(device.created_at) }}</el-descriptions-item>
           <el-descriptions-item label="更新时间">{{ formatTime(device.updated_at) }}</el-descriptions-item>
@@ -101,11 +107,11 @@
           <div class="card-header-content">
             <span class="card-title">服务状态</span>
             <el-tag 
-              :type="getServiceTagType(device.service_status)" 
+              :type="getServiceTagType(device.computed_service_status || device.service_status)" 
               size="large"
               effect="dark"
             >
-              {{ getServiceStatusText(device.service_status) }}
+              {{ getServiceStatusText(device.computed_service_status || device.service_status) }}
             </el-tag>
           </div>
         </template>

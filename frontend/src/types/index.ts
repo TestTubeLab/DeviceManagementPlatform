@@ -32,6 +32,10 @@ export interface Device {
   config: Record<string, any>
   created_at: string
   updated_at: string
+  // 动态计算字段（后端根据心跳时间实时计算）
+  is_online?: boolean
+  computed_status?: DeviceStatus
+  computed_service_status?: ServiceStatus
 }
 
 // 部署任务状态

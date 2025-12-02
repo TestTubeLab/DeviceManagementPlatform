@@ -179,11 +179,26 @@ class Device(models.Model):
     def __str__(self):
         return f"{self.name or self.device_id} ({self.get_status_display()})"
     
+    @property
     def is_online(self):
-        """判断设备是否在线（5分钟内有心跳）"""
+        """判断设备是否在线（2分钟内有心跳）"""
         if not self.last_heartbeat:
             return False
-        return (timezone.now() - self.last_heartbeat).total_seconds() < 300
+        return (timezone.now() - self.last_heartbeat).total_seconds() < 120
+    
+    @property
+    def computed_status(self):
+        """动态计算设备状态（根据心跳判断真实在线状态）"""
+        if not self.is_online:
+            return 'offline'
+        return self.status if self.status != 'offline' else 'online'
+    
+    @property
+    def computed_service_status(self):
+        """动态计算服务状态（离线时服务状态为未知）"""
+        if not self.is_online:
+            return 'unknown'
+        return self.service_status
 
 
 class DeploymentTask(models.Model):

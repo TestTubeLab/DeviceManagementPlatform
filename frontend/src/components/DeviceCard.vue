@@ -10,7 +10,7 @@
           <div class="device-id">{{ device.device_id }}</div>
         </div>
       </div>
-      <StatusBadge :status="device.status" />
+      <StatusBadge :status="device.computed_status || device.status" />
     </div>
     
     <el-divider style="margin: 12px 0" />
@@ -80,7 +80,8 @@ defineEmits<{
 }>()
 
 const statusClass = computed(() => {
-  return `status-${props.device.status}`
+  const status = props.device.computed_status || props.device.status
+  return `status-${status}`
 })
 
 const heartbeatText = computed(() => {
@@ -89,7 +90,7 @@ const heartbeatText = computed(() => {
 })
 
 const serviceStatusClass = computed(() => {
-  const status = props.device.service_status || 'unknown'
+  const status = props.device.computed_service_status || props.device.service_status || 'unknown'
   return `service-${status}`
 })
 
@@ -99,7 +100,8 @@ const serviceStatusText = computed(() => {
     unhealthy: '异常',
     unknown: '未知'
   }
-  return map[props.device.service_status] || '未知'
+  const status = props.device.computed_service_status || props.device.service_status
+  return map[status] || '未知'
 })
 </script>
 
