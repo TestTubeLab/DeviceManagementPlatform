@@ -13,6 +13,7 @@ class DeviceSerializer(serializers.ModelSerializer):
     is_online = serializers.SerializerMethodField()
     computed_status = serializers.SerializerMethodField()
     computed_service_status = serializers.SerializerMethodField()
+    agent_version = serializers.SerializerMethodField()
     
     class Meta:
         model = Device
@@ -30,6 +31,12 @@ class DeviceSerializer(serializers.ModelSerializer):
     def get_computed_service_status(self, obj):
         """动态计算服务状态"""
         return obj.computed_service_status
+    
+    def get_agent_version(self, obj):
+        """获取 Agent 版本（存储在 config 字段中）"""
+        if obj.config:
+            return obj.config.get('agent_version', 'unknown')
+        return 'unknown'
 
 
 class DeploymentTaskSerializer(serializers.ModelSerializer):

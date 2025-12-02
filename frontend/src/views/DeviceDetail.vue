@@ -27,7 +27,20 @@
           <el-descriptions-item label="安装位置">{{ device.location || '-' }}</el-descriptions-item>
           <el-descriptions-item label="MAC地址">{{ device.mac_address || '-' }}</el-descriptions-item>
           <el-descriptions-item label="IP地址">{{ device.ip_address || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="当前版本">{{ device.current_version || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="项目版本">{{ device.current_version || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Agent版本">
+            <span>{{ device.agent_version || 'unknown' }}</span>
+            <el-button 
+              v-if="device.is_online" 
+              type="primary" 
+              link 
+              size="small" 
+              style="margin-left: 8px"
+              @click="handleUpdateAgent"
+            >
+              更新
+            </el-button>
+          </el-descriptions-item>
           <el-descriptions-item label="设备分组">{{ device.group || '-' }}</el-descriptions-item>
           <el-descriptions-item label="最后心跳">
             <span v-if="device.last_heartbeat">
@@ -256,7 +269,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Refresh, Setting, Delete, Edit, Document } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDeviceStore } from '@/stores/device'
-import { restartDevice, deleteDevice, updateDevice, getContainerLogs } from '@/api/device'
+import { restartDevice, deleteDevice, updateDevice, getContainerLogs, updateAgent } from '@/api/device'
 import { getProjects } from '@/api/project'
 import StatusBadge from '@/components/StatusBadge.vue'
 import dayjs from 'dayjs'
@@ -320,7 +333,7 @@ const formatTime = (time: string) => {
 }
 
 const formatLogTime = (time: string) => {
-  return dayjs(time).format('HH:mm:ss')
+  return dayjs(time).format('MM-DD HH:mm:ss')
 }
 
 const getProgressColor = (percentage: number) => {
@@ -425,6 +438,29 @@ const handleRestart = async () => {
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error('重启任务创建失败')
+    }
+  }
+}
+
+const handleUpdateAgent = async () => {
+  if (!device.value) return
+  
+  try {
+    await ElMessageBox.confirm(
+      '确定要更新该设备的 Agent 吗？设备将在下次心跳时自动更新并重启 Agent 服务。',
+      '更新 Agent',
+      {
+        confirmButtonText: '确定更新',
+        cancelButtonText: '取消',
+        type: 'info',
+      }
+    )
+    
+    await updateAgent(device.value.device_id)
+    ElMessage.success('更新命令已发送，设备将在下次心跳时执行更新')
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('发送更新命令失败')
     }
   }
 }

@@ -36,6 +36,7 @@ export interface Device {
   is_online?: boolean
   computed_status?: DeviceStatus
   computed_service_status?: ServiceStatus
+  agent_version?: string
 }
 
 // 部署任务状态

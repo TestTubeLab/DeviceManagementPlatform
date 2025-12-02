@@ -30,12 +30,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
+AGENT_VERSION = "1.1.0"  # Agent 版本号，每次更新递增
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
+AGENT_SCRIPT_PATH = "/opt/device-agent/agent.py"  # Agent 脚本路径
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "10"))  # 心跳间隔（秒）
 TASK_POLL_INTERVAL = int(os.getenv("TASK_POLL_INTERVAL", "5"))   # 任务轮询间隔（秒）
 LOG_UPLOAD_INTERVAL = int(os.getenv("LOG_UPLOAD_INTERVAL", "30")) # 日志上传间隔（秒）
+UPDATE_CHECK_INTERVAL = int(os.getenv("UPDATE_CHECK_INTERVAL", "3600")) # 更新检查间隔（1小时）
 
 # ==================== 设备注册 ====================
 def register_device():
@@ -258,6 +261,7 @@ def send_heartbeat():
     
     data = {
         "version": version,
+        "agent_version": AGENT_VERSION,  # 上报 Agent 版本
         **metrics,
         **container_info,
         **health_info
@@ -289,18 +293,69 @@ def send_heartbeat():
         return {"command": "none"}
 
 # ==================== 容器日志收集与上传 ====================
-def collect_container_logs(container_name="middleware", lines=100):
-    """收集容器日志"""
+def get_container_log_path(container_name):
+    """获取容器日志文件路径"""
     try:
+        result = subprocess.run(
+            ["docker", "inspect", container_name, "--format", "{{.LogPath}}"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return None
+    except Exception as e:
+        logger.error(f"获取容器日志路径失败: {e}")
+        return None
+
+def collect_container_logs(container_name="middleware", lines=100):
+    """
+    收集容器日志 - 直接读取日志文件，避免 docker logs 命令卡住
+    """
+    try:
+        # 方式1：直接读取日志文件（更稳定）
+        log_path = get_container_log_path(container_name)
+        if log_path and os.path.exists(log_path):
+            try:
+                # 使用 tail 命令读取最后 N 行（更快）
+                result = subprocess.run(
+                    ["tail", "-n", str(lines), log_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0 and result.stdout:
+                    # 解析 JSON 格式的 Docker 日志
+                    log_lines = []
+                    for line in result.stdout.strip().split('\n'):
+                        try:
+                            import json
+                            log_entry = json.loads(line)
+                            log_content = log_entry.get('log', '').rstrip('\n')
+                            if log_content:
+                                log_lines.append(log_content)
+                        except json.JSONDecodeError:
+                            # 非 JSON 格式，直接添加
+                            if line.strip():
+                                log_lines.append(line.strip())
+                    if log_lines:
+                        return '\n'.join(log_lines)
+            except subprocess.TimeoutExpired:
+                logger.warning(f"读取日志文件超时: {log_path}")
+            except Exception as e:
+                logger.debug(f"读取日志文件失败，尝试 docker logs: {e}")
+        
+        # 方式2：回退到 docker logs 命令（设置更短的超时）
         result = subprocess.run(
             ["docker", "logs", "--tail", str(lines), container_name],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=10  # 缩短超时时间
         )
-        # 合并 stdout 和 stderr
         logs = result.stdout + result.stderr
         return logs.strip() if logs else ""
+        
     except subprocess.TimeoutExpired:
         logger.warning(f"收集容器日志超时: {container_name}")
         return ""
@@ -335,6 +390,88 @@ def upload_container_logs(container_name="middleware"):
     except Exception as e:
         logger.error(f"日志上传失败: {e}")
         return False
+
+# ==================== Agent 自动更新 ====================
+def check_agent_update():
+    """检查 Agent 是否有新版本"""
+    try:
+        resp = requests.get(
+            f"{CLOUD_SERVER}/agent/version/",
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            latest_version = data.get('version', '')
+            if latest_version and latest_version != AGENT_VERSION:
+                logger.info(f"发现 Agent 新版本: {latest_version} (当前: {AGENT_VERSION})")
+                return latest_version
+        return None
+    except Exception as e:
+        logger.debug(f"检查 Agent 更新失败: {e}")
+        return None
+
+def download_new_agent():
+    """下载新版本 Agent 脚本"""
+    try:
+        resp = requests.get(
+            f"{CLOUD_SERVER}/agent/download/",
+            timeout=60
+        )
+        if resp.status_code == 200:
+            return resp.text
+        else:
+            logger.error(f"下载 Agent 失败: {resp.status_code}")
+            return None
+    except Exception as e:
+        logger.error(f"下载 Agent 失败: {e}")
+        return None
+
+def apply_agent_update():
+    """应用 Agent 更新：下载新版本并重启服务"""
+    logger.info("开始更新 Agent...")
+    
+    # 1. 下载新版本
+    new_script = download_new_agent()
+    if not new_script:
+        logger.error("下载新版本失败，取消更新")
+        return False
+    
+    # 2. 备份当前版本
+    backup_path = f"{AGENT_SCRIPT_PATH}.backup"
+    try:
+        if os.path.exists(AGENT_SCRIPT_PATH):
+            import shutil
+            shutil.copy2(AGENT_SCRIPT_PATH, backup_path)
+            logger.info(f"已备份当前版本到: {backup_path}")
+    except Exception as e:
+        logger.warning(f"备份失败: {e}")
+    
+    # 3. 写入新版本
+    try:
+        with open(AGENT_SCRIPT_PATH, 'w') as f:
+            f.write(new_script)
+        logger.info("新版本已写入")
+    except Exception as e:
+        logger.error(f"写入新版本失败: {e}")
+        # 尝试恢复备份
+        if os.path.exists(backup_path):
+            import shutil
+            shutil.copy2(backup_path, AGENT_SCRIPT_PATH)
+            logger.info("已恢复备份版本")
+        return False
+    
+    # 4. 重启服务
+    logger.info("重启 Agent 服务...")
+    try:
+        subprocess.run(
+            ["systemctl", "restart", "device-agent"],
+            timeout=30
+        )
+    except Exception as e:
+        logger.error(f"重启服务失败: {e}")
+        return False
+    
+    return True
 
 # ==================== 轮询部署任务 ====================
 def poll_deployment_tasks():
@@ -1117,16 +1254,19 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Device Agent 启动")
     logger.info(f"设备ID: {device_id}")
-    logger.info(f"当前版本: {get_current_version()}")
+    logger.info(f"Agent版本: {AGENT_VERSION}")
+    logger.info(f"项目版本: {get_current_version()}")
     logger.info(f"云端服务器: {CLOUD_SERVER}")
     logger.info(f"心跳间隔: {HEARTBEAT_INTERVAL}秒")
     logger.info(f"任务轮询间隔: {TASK_POLL_INTERVAL}秒")
     logger.info(f"日志上传间隔: {LOG_UPLOAD_INTERVAL}秒")
+    logger.info(f"更新检查间隔: {UPDATE_CHECK_INTERVAL}秒")
     logger.info("=" * 60)
     
     last_heartbeat = 0
     last_task_poll = 0
     last_log_upload = 0
+    last_update_check = 0
     
     while True:
         try:
@@ -1139,11 +1279,16 @@ def main():
                 last_heartbeat = current_time
                 
                 # 处理心跳返回的命令
-                if command.get("command") == "update":
+                cmd_type = command.get("command")
+                if cmd_type == "update":
                     task_id = command.get("task_id")
                     version = command.get("version")
                     logger.info(f"收到更新命令: 版本 {version}")
                     execute_update(task_id, version)
+                elif cmd_type == "update_agent":
+                    # 收到服务器推送的 Agent 更新命令
+                    logger.info("收到 Agent 更新命令")
+                    apply_agent_update()
             
             # 定时轮询部署任务
             if current_time - last_task_poll >= TASK_POLL_INTERVAL:
@@ -1168,6 +1313,14 @@ def main():
                 logger.debug("上传容器日志...")
                 upload_container_logs("middleware")
                 last_log_upload = current_time
+            
+            # 定时检查 Agent 更新（每小时）
+            if current_time - last_update_check >= UPDATE_CHECK_INTERVAL:
+                logger.debug("检查 Agent 更新...")
+                new_version = check_agent_update()
+                if new_version:
+                    apply_agent_update()
+                last_update_check = current_time
             
             # 短暂休眠，避免CPU占用过高
             time.sleep(1)

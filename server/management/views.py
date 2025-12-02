@@ -24,6 +24,9 @@ from .serializers import (
     CodePackageSerializer, ProjectSerializer, ProjectConfigSerializer, ProjectDeploymentSerializer
 )
 
+# Agent 最新版本号（每次更新 Agent 时需要同步修改）
+AGENT_VERSION = "1.1.0"
+
 
 class DeviceViewSet(viewsets.ModelViewSet):
     """设备管理API"""
@@ -112,6 +115,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
         POST /api/devices/{device_id}/heartbeat/
         Body: {
             "version": "v1.0.3",
+            "agent_version": "1.1.0",
             "cpu_usage": 45.2,
             "memory_usage": 62.5,
             "disk_usage": 38.7,
@@ -139,6 +143,13 @@ class DeviceViewSet(viewsets.ModelViewSet):
         device.service_response_time = request.data.get('service_response_time', device.service_response_time)
         device.last_health_check = timezone.now()
         
+        # 保存 Agent 版本到 config 字段（无需数据库迁移）
+        agent_version = request.data.get('agent_version')
+        if agent_version:
+            if not device.config:
+                device.config = {}
+            device.config['agent_version'] = agent_version
+        
         # 更新在线状态：只要有心跳，就是在线（除非正在部署/更新）
         if device.status in ['offline', 'waiting']:
             device.status = 'online'
@@ -158,7 +169,13 @@ class DeviceViewSet(viewsets.ModelViewSet):
         
         response_data = {"command": "none"}
         
-        if pending_deployment:
+        # 检查是否需要更新 Agent（优先级最高）
+        if device.config and device.config.get('pending_agent_update'):
+            response_data = {"command": "update_agent"}
+            # 清除标记
+            device.config['pending_agent_update'] = False
+            device.save()
+        elif pending_deployment:
             response_data = {
                 "command": "deploy",
                 "task_id": pending_deployment.id,
@@ -373,6 +390,65 @@ class DeviceViewSet(viewsets.ModelViewSet):
                     )
         
         return Response({"status": "success", "message": "日志已上传"})
+    
+    @action(detail=True, methods=['post'])
+    def update_agent(self, request, device_id=None):
+        """
+        触发设备更新 Agent（管理员调用）
+        POST /api/devices/{device_id}/update_agent/
+        设备下次心跳时会收到更新命令
+        """
+        device = self.get_object()
+        
+        # 标记需要更新 Agent
+        if not device.config:
+            device.config = {}
+        device.config['pending_agent_update'] = True
+        device.save()
+        
+        return Response({
+            "status": "success",
+            "message": f"已标记设备 {device_id} 需要更新 Agent，将在下次心跳时执行"
+        })
+
+
+# ==================== Agent 版本管理 API ====================
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def agent_version(request):
+    """
+    获取最新 Agent 版本信息
+    GET /api/agent/version/
+    """
+    return Response({
+        "version": AGENT_VERSION,
+        "download_url": "/api/agent/download/"
+    })
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def agent_download(request):
+    """
+    下载最新 Agent 脚本
+    GET /api/agent/download/
+    """
+    agent_path = os.path.join(settings.BASE_DIR, 'device-agent', 'device-agent.py')
+    
+    # 如果本地没有，尝试从 device-agent 目录读取
+    if not os.path.exists(agent_path):
+        # Docker 部署时的路径
+        agent_path = '/app/device-agent/device-agent.py'
+    
+    if os.path.exists(agent_path):
+        with open(agent_path, 'r') as f:
+            content = f.read()
+        return HttpResponse(content, content_type='text/plain')
+    else:
+        return Response(
+            {"error": "Agent script not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
 
 
 class DeploymentTaskViewSet(viewsets.ModelViewSet):

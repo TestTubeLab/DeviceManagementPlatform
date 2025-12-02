@@ -28,8 +28,12 @@
         <span class="value">{{ device.ip_address || '-' }}</span>
       </div>
       <div class="info-row">
-        <span class="label">版本:</span>
+        <span class="label">项目版本:</span>
         <span class="value">{{ device.current_version || '-' }}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Agent:</span>
+        <span class="value">{{ device.agent_version || 'unknown' }}</span>
       </div>
       <div class="info-row">
         <span class="label">最后心跳:</span>

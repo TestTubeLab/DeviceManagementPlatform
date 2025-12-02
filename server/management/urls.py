@@ -19,6 +19,9 @@ urlpatterns = [
     path('', include(router.urls)),
     path('install.sh', views.get_install_script, name='install_script'),
     path('agent/device-agent.py', views.get_agent_script, name='agent_script'),
+    # Agent 版本管理
+    path('agent/version/', views.agent_version, name='agent_version'),
+    path('agent/download/', views.agent_download, name='agent_download'),
     # 用户认证
     path('auth/login/', views.user_login, name='user_login'),
     path('auth/logout/', views.user_logout, name='user_logout'),

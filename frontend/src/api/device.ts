@@ -64,3 +64,8 @@ export const getContainerLogs = (deviceId: string) => {
   return request.get<any, { device_id: string, logs: Array<{level: string, message: string, timestamp: string}> }>(`/devices/${deviceId}/container_logs/`)
 }
 
+// 更新设备 Agent
+export const updateAgent = (deviceId: string) => {
+  return request.post(`/devices/${deviceId}/update_agent/`)
+}
+
