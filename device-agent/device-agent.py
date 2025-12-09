@@ -1257,7 +1257,8 @@ def apply_middleware_config(config_id, config_data):
     from datetime import datetime
     
     try:
-        code_path = "/opt/work/MiddlewareServer"
+        # 默认代码路径，与Project.code_mount_path一致
+        code_path = "/opt/project-code/MiddlewareServer"
         backup_path = f"/opt/config-backup/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         logger.info("=" * 60)
