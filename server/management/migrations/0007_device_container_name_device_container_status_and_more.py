@@ -56,16 +56,6 @@ class Migration(migrations.Migration):
             name='task_type',
             field=models.CharField(choices=[('deploy', '部署'), ('restart', '重启')], default='deploy', max_length=20, verbose_name='任务类型'),
         ),
-        migrations.AlterField(
-            model_name='project',
-            name='docker_image',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, to='management.dockerimage', verbose_name='Docker镜像(平台托管)'),
-        ),
-        migrations.AlterField(
-            model_name='projectdeployment',
-            name='project',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, to='management.project', verbose_name='项目'),
-        ),
         migrations.CreateModel(
             name='DeviceConfigHistory',
             fields=[
