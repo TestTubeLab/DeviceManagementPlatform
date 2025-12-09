@@ -226,7 +226,7 @@
         <el-space>
           <el-button type="primary" :icon="Refresh" @click="handleRestart">重启容器</el-button>
           <el-button type="success" :icon="Document" @click="handleViewLogs">查看日志</el-button>
-          <el-button :icon="Setting" disabled title="配置管理功能开发中">配置管理</el-button>
+          <el-button :icon="Setting" @click="showConfigDialog = true">配置管理</el-button>
           <el-button :icon="Delete" type="danger" @click="handleDelete">删除设备</el-button>
         </el-space>
         <el-alert
@@ -236,6 +236,137 @@
           style="margin-top: 16px"
         />
       </el-card>
+      
+      <!-- 配置管理对话框 -->
+      <el-dialog v-model="showConfigDialog" title="MiddlewareServer配置管理" width="900px" top="5vh">
+        <el-tabs v-model="activeConfigTab">
+          <el-tab-pane label="编辑配置" name="edit">
+            <el-form :model="config" label-width="140px">
+              <!-- 网段快捷设置 -->
+              <el-divider content-position="left">
+                <el-icon><Connection /></el-icon> 网络配置
+              </el-divider>
+              
+              <el-form-item label="网段快捷设置">
+                <el-input v-model="networkSegment" placeholder="192.168.31" style="width: 200px">
+                  <template #append>
+                    <el-button @click="applyNetworkSegment">应用到所有相机</el-button>
+                  </template>
+                </el-input>
+                <el-text type="info" size="small" style="margin-left: 12px">
+                  设置后自动生成：192.168.x.201-205
+                </el-text>
+              </el-form-item>
+              
+              <!-- 相机IP配置 -->
+              <el-divider content-position="left">
+                <el-icon><Camera /></el-icon> 相机IP配置
+              </el-divider>
+              
+              <el-form-item 
+                v-for="(cameraName, index) in cameraNames" 
+                :key="cameraName" 
+                :label="cameraName"
+              >
+                <el-input v-model="config.cameras[cameraName]" placeholder="192.168.31.201" style="width: 300px">
+                  <template #prepend>{{ '.201 + ' + index }}</template>
+                </el-input>
+              </el-form-item>
+              
+              <!-- 上位机配置 -->
+              <el-divider content-position="left">
+                <el-icon><Connection /></el-icon> 上位机Socket配置
+              </el-divider>
+              
+              <el-form-item label="上位机IP">
+                <el-input v-model="config.plc.host" placeholder="192.168.31.29" style="width: 300px" />
+              </el-form-item>
+              
+              <el-form-item label="Socket端口">
+                <el-input-number v-model="config.plc.port" :min="1" :max="65535" />
+              </el-form-item>
+              
+              <!-- 后端配置 -->
+              <el-divider content-position="left">
+                <el-icon><Monitor /></el-icon> 后端API配置
+              </el-divider>
+              
+              <el-form-item label="后端地址">
+                <el-input v-model="config.backend.host" placeholder="127.0.0.1" style="width: 300px" />
+                <el-text type="info" size="small" style="margin-left: 12px">
+                  通常为 127.0.0.1（容器内部）
+                </el-text>
+              </el-form-item>
+              
+              <el-form-item label="后端端口">
+                <el-input-number v-model="config.backend.port" :min="1" :max="65535" />
+              </el-form-item>
+            </el-form>
+            
+            <div style="margin-top: 20px; text-align: center">
+              <el-button @click="showConfigDialog = false">取消</el-button>
+              <el-button type="primary" @click="handleSaveConfig" :loading="savingConfig">
+                💾 保存并重启服务
+              </el-button>
+            </div>
+            
+            <el-alert
+              title="保存后配置将立即应用，服务会自动重启（约15秒），期间服务不可用"
+              type="warning"
+              :closable="false"
+              style="margin-top: 20px"
+            />
+          </el-tab-pane>
+          
+          <el-tab-pane label="配置历史" name="history">
+            <div v-loading="loadingHistory">
+              <el-timeline v-if="configHistory.length > 0">
+                <el-timeline-item 
+                  v-for="item in configHistory" 
+                  :key="item.id"
+                  :timestamp="formatTime(item.applied_at)" 
+                  placement="top"
+                  :type="item.status === 'success' ? 'success' : (item.status === 'failed' ? 'danger' : 'info')"
+                >
+                  <el-card>
+                    <div style="display: flex; justify-content: space-between; align-items: center">
+                      <div>
+                        <el-tag 
+                          :type="item.status === 'success' ? 'success' : (item.status === 'failed' ? 'danger' : 'info')"
+                          size="large"
+                        >
+                          {{ item.status_display }}
+                        </el-tag>
+                        <el-tag type="info" size="small" style="margin-left: 8px" v-if="item.is_active">
+                          当前生效
+                        </el-tag>
+                        <span style="margin-left: 12px; color: #606266">
+                          操作人：{{ item.applied_by }}
+                        </span>
+                      </div>
+                      <div>
+                        <el-button link type="primary" @click="viewConfigDetail(item)">查看</el-button>
+                        <el-button 
+                          link 
+                          type="warning" 
+                          @click="handleRollback(item)"
+                          :disabled="item.is_active"
+                        >
+                          回滚
+                        </el-button>
+                      </div>
+                    </div>
+                    <div v-if="item.error_message" style="margin-top: 8px">
+                      <el-text type="danger" size="small">错误：{{ item.error_message }}</el-text>
+                    </div>
+                  </el-card>
+                </el-timeline-item>
+              </el-timeline>
+              <el-empty v-else description="暂无配置历史" />
+            </div>
+          </el-tab-pane>
+        </el-tabs>
+      </el-dialog>
       
       <!-- 查看日志对话框 -->
       <el-dialog v-model="showLogsDialog" title="容器日志" width="900px" top="5vh">
@@ -266,10 +397,14 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Refresh, Setting, Delete, Edit, Document } from '@element-plus/icons-vue'
+import { Refresh, Setting, Delete, Edit, Document, Camera, Connection, Monitor } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDeviceStore } from '@/stores/device'
-import { restartDevice, deleteDevice, updateDevice, getContainerLogs, updateAgent } from '@/api/device'
+import { 
+  restartDevice, deleteDevice, updateDevice, getContainerLogs, updateAgent,
+  getCurrentConfig, applyConfig, getConfigHistory, rollbackConfig,
+  type DeviceConfig, type ConfigHistory 
+} from '@/api/device'
 import { getProjects } from '@/api/project'
 import StatusBadge from '@/components/StatusBadge.vue'
 import dayjs from 'dayjs'
@@ -296,6 +431,26 @@ const showLogsDialog = ref(false)
 const loadingLogs = ref(false)
 const containerLogs = ref<Array<{level: string, message: string, timestamp: string}>>([])
 const logsContentRef = ref<HTMLElement | null>(null)
+
+// 配置管理
+const showConfigDialog = ref(false)
+const activeConfigTab = ref('edit')
+const savingConfig = ref(false)
+const loadingHistory = ref(false)
+const networkSegment = ref('192.168.31')
+const cameraNames = ['样品盘', '前处理', '提取-纯化', '孔板传送', '反应体系构建']
+const config = ref<DeviceConfig>({
+  cameras: {
+    '样品盘': '192.168.31.201',
+    '前处理': '192.168.31.202',
+    '提取-纯化': '192.168.31.203',
+    '孔板传送': '192.168.31.204',
+    '反应体系构建': '192.168.31.205'
+  },
+  plc: { host: '192.168.31.29', port: 9088 },
+  backend: { host: '127.0.0.1', port: 8088 }
+})
+const configHistory = ref<ConfigHistory[]>([])
 
 // 监听device变化，更新自动部署项目和分组
 watch(device, (newDevice) => {
@@ -488,6 +643,174 @@ const handleDelete = async () => {
     }
   }
 }
+
+// ==================== 配置管理功能 ====================
+// 应用网段到所有相机
+const applyNetworkSegment = () => {
+  const segment = networkSegment.value.trim()
+  if (!segment) {
+    ElMessage.warning('请输入网段')
+    return
+  }
+  
+  cameraNames.forEach((name, index) => {
+    config.value.cameras[name] = `${segment}.${201 + index}`
+  })
+  
+  // 同时更新上位机IP（通常在同一网段）
+  config.value.plc.host = `${segment}.29`
+  
+  ElMessage.success('网段已应用到所有相机')
+}
+
+// 保存配置并重启服务
+const handleSaveConfig = async () => {
+  if (!device.value) return
+  
+  try {
+    await ElMessageBox.confirm(
+      '确定要应用新配置并重启服务吗？服务将短暂中断约15秒。',
+      '确认操作',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+    
+    savingConfig.value = true
+    
+    // 应用配置
+    const result = await applyConfig(device.value.device_id, config.value)
+    ElMessage.success('配置已提交，设备正在应用...')
+    
+    showConfigDialog.value = false
+    
+    // 轮询检查配置应用状态
+    pollConfigStatus(result.config_id)
+    
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('配置应用失败')
+    }
+  } finally {
+    savingConfig.value = false
+  }
+}
+
+// 轮询配置应用状态
+const pollConfigStatus = (configId: number) => {
+  const maxAttempts = 20  // 最多检查20次（20秒）
+  let attempts = 0
+  
+  const timer = setInterval(async () => {
+    attempts++
+    
+    try {
+      const history = await getConfigHistory(device.value!.device_id)
+      const latest = history.find(h => h.id === configId)
+      
+      if (latest && latest.status !== 'pending') {
+        clearInterval(timer)
+        
+        if (latest.status === 'success') {
+          ElMessage.success('✅ 配置应用成功，服务已重启')
+          // 刷新配置历史
+          await loadConfigHistory()
+        } else {
+          ElMessage.error(`❌ 配置应用失败: ${latest.error_message}`)
+        }
+      } else if (attempts >= maxAttempts) {
+        clearInterval(timer)
+        ElMessage.warning('配置应用超时，请查看配置历史确认状态')
+      }
+    } catch (error) {
+      console.error('检查配置状态失败:', error)
+    }
+  }, 2000)  // 每2秒检查一次
+}
+
+// 加载配置历史
+const loadConfigHistory = async () => {
+  if (!device.value) return
+  
+  loadingHistory.value = true
+  try {
+    configHistory.value = await getConfigHistory(device.value.device_id)
+  } catch (error) {
+    ElMessage.error('加载配置历史失败')
+  } finally {
+    loadingHistory.value = false
+  }
+}
+
+// 查看配置详情
+const viewConfigDetail = (item: ConfigHistory) => {
+  ElMessageBox.alert(
+    `<pre style="max-height: 400px; overflow: auto">${JSON.stringify(item.config_data, null, 2)}</pre>`,
+    '配置详情',
+    {
+      dangerouslyUseHTMLString: true,
+      confirmButtonText: '关闭'
+    }
+  )
+}
+
+// 回滚配置
+const handleRollback = async (item: ConfigHistory) => {
+  if (!device.value) return
+  
+  try {
+    await ElMessageBox.confirm(
+      `确定要回滚到 ${dayjs(item.applied_at).format('YYYY-MM-DD HH:mm:ss')} 的配置吗？`,
+      '回滚确认',
+      {
+        confirmButtonText: '确定回滚',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+    
+    loadingHistory.value = true
+    const result = await rollbackConfig(device.value.device_id, item.id)
+    ElMessage.success('配置回滚已提交')
+    
+    // 轮询状态
+    pollConfigStatus(result.config_id)
+    
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('配置回滚失败')
+    }
+  } finally {
+    loadingHistory.value = false
+  }
+}
+
+// 监听配置对话框打开，加载当前配置和历史
+watch(showConfigDialog, async (newVal) => {
+  if (newVal && device.value) {
+    // 加载当前配置
+    try {
+      const currentConfig = await getCurrentConfig(device.value.device_id)
+      config.value = currentConfig
+      
+      // 从相机IP推断网段
+      const firstCameraIp = Object.values(currentConfig.cameras)[0]
+      if (firstCameraIp) {
+        const parts = firstCameraIp.split('.')
+        if (parts.length === 4) {
+          networkSegment.value = `${parts[0]}.${parts[1]}.${parts[2]}`
+        }
+      }
+    } catch (error) {
+      console.error('加载当前配置失败:', error)
+    }
+    
+    // 加载配置历史
+    await loadConfigHistory()
+  }
+})
 
 const handleAutoDeployChange = async () => {
   if (!device.value) return

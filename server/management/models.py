@@ -358,3 +358,61 @@ class ProjectDeployment(models.Model):
     
     def __str__(self):
         return f"{self.project.name} -> {self.device.device_id} ({self.status})"
+
+
+class DeviceConfigHistory(models.Model):
+    """设备配置历史记录"""
+    
+    STATUS_CHOICES = [
+        ('pending', '待应用'),
+        ('success', '成功'),
+        ('failed', '失败'),
+    ]
+    
+    device = models.ForeignKey(
+        Device, 
+        on_delete=models.CASCADE, 
+        related_name='config_history',
+        verbose_name='设备'
+    )
+    
+    # 配置数据（JSON格式）
+    # 示例结构:
+    # {
+    #   "cameras": {
+    #     "样品盘": "192.168.31.201",
+    #     "前处理": "192.168.31.202",
+    #     "提取-纯化": "192.168.31.203",
+    #     "孔板传送": "192.168.31.204",
+    #     "反应体系构建": "192.168.31.205"
+    #   },
+    #   "plc": {"host": "192.168.31.29", "port": 9088},
+    #   "backend": {"host": "127.0.0.1", "port": 8088}
+    # }
+    config_data = models.JSONField(verbose_name='配置数据')
+    
+    # 元数据
+    applied_by = models.CharField(max_length=100, verbose_name='操作人')
+    applied_at = models.DateTimeField(auto_now_add=True, verbose_name='应用时间')
+    status = models.CharField(
+        max_length=20, 
+        choices=STATUS_CHOICES, 
+        default='pending',
+        verbose_name='状态'
+    )
+    error_message = models.TextField(blank=True, verbose_name='错误信息')
+    
+    # 标记当前生效的配置
+    is_active = models.BooleanField(default=False, verbose_name='当前生效')
+    
+    class Meta:
+        verbose_name = '设备配置历史'
+        verbose_name_plural = '设备配置历史列表'
+        ordering = ['-applied_at']
+        indexes = [
+            models.Index(fields=['device', '-applied_at']),
+            models.Index(fields=['device', 'is_active']),
+        ]
+    
+    def __str__(self):
+        return f"{self.device.device_id} - {self.get_status_display()} ({self.applied_at})"

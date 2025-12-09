@@ -39,6 +39,7 @@ HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "10"))  # 心跳间隔�
 TASK_POLL_INTERVAL = int(os.getenv("TASK_POLL_INTERVAL", "5"))   # 任务轮询间隔（秒）
 LOG_UPLOAD_INTERVAL = int(os.getenv("LOG_UPLOAD_INTERVAL", "30")) # 日志上传间隔（秒）
 UPDATE_CHECK_INTERVAL = int(os.getenv("UPDATE_CHECK_INTERVAL", "3600")) # 更新检查间隔（1小时）
+CONFIG_CHECK_INTERVAL = int(os.getenv("CONFIG_CHECK_INTERVAL", "10")) # 配置检查间隔（秒）
 
 # ==================== 设备注册 ====================
 def register_device():
@@ -1248,6 +1249,232 @@ def report_project_deployment_progress(deployment_id, **kwargs):
     except Exception as e:
         logger.warning(f"上报项目部署进度失败: {e}")
 
+# ==================== 配置管理功能 ====================
+def apply_middleware_config(config_id, config_data):
+    """应用MiddlewareServer配置"""
+    import re
+    import shutil
+    from datetime import datetime
+    
+    try:
+        code_path = "/opt/work/MiddlewareServer"
+        backup_path = f"/opt/config-backup/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        logger.info("=" * 60)
+        logger.info("开始应用配置...")
+        logger.info(f"配置ID: {config_id}")
+        logger.info("=" * 60)
+        
+        # ========== 步骤1: 备份当前配置 ==========
+        logger.info("步骤1: 备份当前配置...")
+        os.makedirs(backup_path, exist_ok=True)
+        
+        files_to_backup = [
+            f"{code_path}/config/devices.yml",
+            f"{code_path}/server/server/settings.py",
+            f"{code_path}/frontend/vite.config.ts"
+        ]
+        
+        for file_path in files_to_backup:
+            if os.path.exists(file_path):
+                filename = os.path.basename(file_path)
+                shutil.copy2(file_path, f"{backup_path}/{filename}")
+                logger.info(f"  已备份: {filename}")
+        
+        # ========== 步骤2: 生成新的配置文件 ==========
+        logger.info("步骤2: 生成新的配置文件...")
+        
+        # 2.1 生成 devices.yml
+        logger.info("  生成 devices.yml...")
+        generate_devices_yml(f"{code_path}/config/devices.yml", config_data['cameras'])
+        
+        # 2.2 修改 settings.py 中的 SOCKET_CONFIG
+        logger.info("  修改 settings.py...")
+        patch_settings_py(f"{code_path}/server/server/settings.py", config_data['plc'])
+        
+        # 2.3 修改 vite.config.ts 中的 proxy target
+        logger.info("  修改 vite.config.ts...")
+        patch_vite_config(f"{code_path}/frontend/vite.config.ts", config_data['backend'])
+        
+        # ========== 步骤3: 重启容器 ==========
+        logger.info("步骤3: 重启容器...")
+        subprocess.run(["docker", "restart", "middleware"], check=True, timeout=60)
+        logger.info("  容器重启命令已执行")
+        
+        # ========== 步骤4: 等待服务启动 ==========
+        logger.info("步骤4: 等待服务启动...")
+        time.sleep(15)  # 等待15秒让服务启动
+        
+        # ========== 步骤5: 验证服务 ==========
+        logger.info("步骤5: 验证服务...")
+        try:
+            resp = requests.get("http://localhost:8000/", timeout=10)
+            if resp.status_code == 200:
+                logger.info("  ✅ 服务启动成功")
+            else:
+                logger.warning(f"  ⚠️ 服务响应异常: {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"  ⚠️ 服务验证失败（可能正在启动）: {e}")
+        
+        logger.info("=" * 60)
+        logger.info("✅ 配置应用成功")
+        logger.info(f"备份位置: {backup_path}")
+        logger.info("=" * 60)
+        
+        return {"success": True}
+        
+    except Exception as e:
+        logger.error("=" * 60)
+        logger.error(f"❌ 配置应用失败: {e}")
+        logger.error("=" * 60)
+        
+        # 尝试回滚
+        try:
+            logger.info("尝试回滚配置...")
+            rollback_config(backup_path, code_path)
+            subprocess.run(["docker", "restart", "middleware"], timeout=60)
+            logger.info("配置已回滚")
+        except Exception as rollback_error:
+            logger.error(f"回滚失败: {rollback_error}")
+        
+        return {"success": False, "error": str(e)}
+
+def generate_devices_yml(output_path, cameras_config):
+    """生成devices.yml"""
+    yaml_content = """## 配置相机驱动与相机IP等
+## 
+## 重连机制说明:
+## - 设备层: HiKDevice.get_frame() 连续失败10次自动触发重连
+## - 插件层: BasePlugin.read() 失败时自动重试3次并触发设备重连
+## - 读取超时: 10秒无响应判定为断连
+## - 重连间隔: 2秒
+## 
+## 如需调整重连参数,请修改以下文件:
+## - MiddlewareServer/server/devices/MvImport/__init__.py (第311行: consecutive_failures >= 10)
+## - MiddlewareServer/server/core/plugin/base.py (第100-101行: max_retries, retry_delay)
+
+"""
+    
+    camera_template = """- name: {name}
+  device: "devices.HiKDevice"
+  params: {ip}
+  config:
+    ExposureTime: {exposure}
+    AcquisitionFrameRate: {frame_rate}{extra}
+
+"""
+    
+    camera_configs = {
+        "样品盘": {"exposure": 11000, "frame_rate": 3, "extra": ""},
+        "前处理": {"exposure": 5600, "frame_rate": 6, "extra": "\n    ReverseY: true"},
+        "孔板传送": {"exposure": 8000, "frame_rate": 3, "extra": ""},
+        "提取-纯化": {"exposure": 12000, "frame_rate": 3, "extra": ""},
+        "反应体系构建": {"exposure": 5000, "frame_rate": 3, "extra": ""}
+    }
+    
+    for name, ip in cameras_config.items():
+        cfg = camera_configs.get(name, {"exposure": 10000, "frame_rate": 3, "extra": ""})
+        yaml_content += camera_template.format(
+            name=name, ip=ip, 
+            exposure=cfg['exposure'],
+            frame_rate=cfg['frame_rate'],
+            extra=cfg['extra']
+        )
+    
+    Path(output_path).write_text(yaml_content, encoding='utf-8')
+    logger.debug(f"devices.yml 已生成: {output_path}")
+
+def patch_settings_py(file_path, plc_config):
+    """修改settings.py中的SOCKET_CONFIG"""
+    import re
+    
+    content = Path(file_path).read_text(encoding='utf-8')
+    
+    # 新的 SOCKET_CONFIG
+    new_socket_config = f'''SOCKET_CONFIG = {{
+    # "server": {{
+    # "HOST": "127.0.0.1",
+    # "PORT": 9088, 
+    # }},
+    "reverse": {{  # 反向socket
+        "HOST": "{plc_config['host']}",
+        "PORT": {plc_config['port']},
+    }},
+}}'''
+    
+    # 正则替换 SOCKET_CONFIG (匹配多行)
+    pattern = r'SOCKET_CONFIG\s*=\s*\{[^}]*"reverse"[^}]*\}[^}]*\}'
+    content = re.sub(pattern, new_socket_config, content, flags=re.DOTALL)
+    
+    Path(file_path).write_text(content, encoding='utf-8')
+    logger.debug(f"settings.py 已修改: {file_path}")
+
+def patch_vite_config(file_path, backend_config):
+    """修改vite.config.ts中的proxy target"""
+    import re
+    
+    content = Path(file_path).read_text(encoding='utf-8')
+    
+    # 替换 target 行
+    pattern = r'target:\s*"http://[^"]*"'
+    replacement = f'target: "http://{backend_config["host"]}:{backend_config["port"]}"'
+    content = re.sub(pattern, replacement, content)
+    
+    Path(file_path).write_text(content, encoding='utf-8')
+    logger.debug(f"vite.config.ts 已修改: {file_path}")
+
+def rollback_config(backup_path, code_path):
+    """回滚配置"""
+    import shutil
+    
+    files_to_restore = [
+        ("devices.yml", f"{code_path}/config/devices.yml"),
+        ("settings.py", f"{code_path}/server/server/settings.py"),
+        ("vite.config.ts", f"{code_path}/frontend/vite.config.ts")
+    ]
+    
+    for filename, dest_path in files_to_restore:
+        backup_file = f"{backup_path}/{filename}"
+        if os.path.exists(backup_file):
+            shutil.copy2(backup_file, dest_path)
+            logger.info(f"已恢复: {filename}")
+
+def check_and_apply_config(device_id):
+    """检查并应用待处理的配置"""
+    try:
+        resp = requests.get(
+            f"{CLOUD_SERVER}/devices/{device_id}/pending_config/",
+            timeout=10
+        )
+        
+        if resp.status_code == 200:
+            pending_config = resp.json()
+            if pending_config.get('has_pending'):
+                logger.info("检测到待应用的配置...")
+                config_id = pending_config['config_id']
+                config_data = pending_config['config_data']
+                
+                # 应用配置
+                result = apply_middleware_config(config_id, config_data)
+                
+                # 上报应用结果
+                requests.post(
+                    f"{CLOUD_SERVER}/devices/{device_id}/config_result/",
+                    json={
+                        'config_id': config_id,
+                        'success': result['success'],
+                        'error': result.get('error', '')
+                    },
+                    timeout=10
+                )
+                
+                if result['success']:
+                    logger.info("✅ 配置应用成功并已上报")
+                else:
+                    logger.error(f"❌ 配置应用失败: {result.get('error')}")
+    except Exception as e:
+        logger.warning(f"检查配置时出错: {e}")
+
 # ==================== 主循环 ====================
 def main():
     device_id = get_device_id()
@@ -1267,6 +1494,7 @@ def main():
     last_task_poll = 0
     last_log_upload = 0
     last_update_check = 0
+    last_config_check = 0
     
     while True:
         try:
@@ -1307,6 +1535,12 @@ def main():
                     execute_project_deployment(deployment)
                 
                 last_task_poll = current_time
+            
+            # 定时检查待应用的配置
+            if current_time - last_config_check >= CONFIG_CHECK_INTERVAL:
+                logger.debug("检查待应用的配置...")
+                check_and_apply_config(device_id)
+                last_config_check = current_time
             
             # 定时上传容器日志
             if current_time - last_log_upload >= LOG_UPLOAD_INTERVAL:

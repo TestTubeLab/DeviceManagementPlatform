@@ -410,6 +410,193 @@ class DeviceViewSet(viewsets.ModelViewSet):
             "status": "success",
             "message": f"已标记设备 {device_id} 需要更新 Agent，将在下次心跳时执行"
         })
+    
+    # ==================== 配置管理 API ====================
+    @action(detail=True, methods=['get'])
+    def current_config(self, request, device_id=None):
+        """
+        获取当前生效的配置
+        GET /api/devices/{device_id}/current_config/
+        """
+        device = self.get_object()
+        active_config = device.config_history.filter(is_active=True).first()
+        
+        if not active_config:
+            # 返回默认配置
+            return Response({
+                "cameras": {
+                    "样品盘": "192.168.31.201",
+                    "前处理": "192.168.31.202",
+                    "提取-纯化": "192.168.31.203",
+                    "孔板传送": "192.168.31.204",
+                    "反应体系构建": "192.168.31.205"
+                },
+                "plc": {"host": "192.168.31.29", "port": 9088},
+                "backend": {"host": "127.0.0.1", "port": 8088}
+            })
+        
+        return Response(active_config.config_data)
+    
+    @action(detail=True, methods=['post'])
+    def apply_config(self, request, device_id=None):
+        """
+        应用新配置（立即生效）
+        POST /api/devices/{device_id}/apply_config/
+        Body: {config_data}
+        """
+        from .serializers import DeviceConfigHistorySerializer
+        device = self.get_object()
+        config_data = request.data
+        
+        # 验证配置格式
+        if not self._validate_config(config_data):
+            return Response(
+                {'error': '配置格式错误'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # 创建配置历史记录
+        from .models import DeviceConfigHistory
+        config_history = DeviceConfigHistory.objects.create(
+            device=device,
+            config_data=config_data,
+            applied_by=request.user.username,
+            status='pending'
+        )
+        
+        # 标记为待应用
+        if not device.config:
+            device.config = {}
+        device.config['pending_config_id'] = config_history.id
+        device.save()
+        
+        return Response({
+            'message': '配置已提交，等待设备应用',
+            'config_id': config_history.id
+        })
+    
+    @action(detail=True, methods=['get'], permission_classes=[AllowAny])
+    def pending_config(self, request, device_id=None):
+        """
+        Agent查询待应用的配置
+        GET /api/devices/{device_id}/pending_config/
+        """
+        device = self.get_object()
+        pending_id = device.config.get('pending_config_id') if device.config else None
+        
+        if not pending_id:
+            return Response({'has_pending': False})
+        
+        from .models import DeviceConfigHistory
+        try:
+            config = DeviceConfigHistory.objects.get(id=pending_id)
+            return Response({
+                'has_pending': True,
+                'config_id': config.id,
+                'config_data': config.config_data
+            })
+        except DeviceConfigHistory.DoesNotExist:
+            return Response({'has_pending': False})
+    
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
+    def config_result(self, request, device_id=None):
+        """
+        Agent上报配置应用结果
+        POST /api/devices/{device_id}/config_result/
+        Body: {config_id, success, error}
+        """
+        device = self.get_object()
+        config_id = request.data['config_id']
+        success = request.data['success']
+        
+        from .models import DeviceConfigHistory
+        config = DeviceConfigHistory.objects.get(id=config_id)
+        
+        if success:
+            # 取消之前的active标记
+            device.config_history.update(is_active=False)
+            config.status = 'success'
+            config.is_active = True
+        else:
+            config.status = 'failed'
+            config.error_message = request.data.get('error', '')
+        
+        config.save()
+        
+        # 清除pending标记
+        if device.config:
+            device.config.pop('pending_config_id', None)
+            device.save()
+        
+        return Response({'message': '已记录'})
+    
+    @action(detail=True, methods=['get'])
+    def config_history(self, request, device_id=None):
+        """
+        获取配置历史
+        GET /api/devices/{device_id}/config_history/
+        """
+        from .serializers import DeviceConfigHistorySerializer
+        device = self.get_object()
+        history = device.config_history.all()[:20]  # 最近20条
+        serializer = DeviceConfigHistorySerializer(history, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def rollback_config(self, request, device_id=None):
+        """
+        回滚到历史配置
+        POST /api/devices/{device_id}/rollback_config/
+        Body: {config_id}
+        """
+        device = self.get_object()
+        config_id = request.data.get('config_id')
+        
+        from .models import DeviceConfigHistory
+        try:
+            old_config = DeviceConfigHistory.objects.get(id=config_id, device=device)
+            
+            # 创建新的配置记录（基于旧配置）
+            new_config = DeviceConfigHistory.objects.create(
+                device=device,
+                config_data=old_config.config_data,
+                applied_by=request.user.username,
+                status='pending'
+            )
+            
+            # 标记为待应用
+            if not device.config:
+                device.config = {}
+            device.config['pending_config_id'] = new_config.id
+            device.save()
+            
+            return Response({
+                'message': '配置回滚已提交',
+                'config_id': new_config.id
+            })
+        except DeviceConfigHistory.DoesNotExist:
+            return Response(
+                {'error': '配置不存在'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+    
+    def _validate_config(self, config_data):
+        """验证配置数据"""
+        required_keys = ['cameras', 'plc', 'backend']
+        if not all(k in config_data for k in required_keys):
+            return False
+        
+        # 验证IP格式
+        import ipaddress
+        try:
+            for ip in config_data['cameras'].values():
+                ipaddress.ip_address(ip)
+            ipaddress.ip_address(config_data['plc']['host'])
+            ipaddress.ip_address(config_data['backend']['host'])
+        except:
+            return False
+        
+        return True
 
 
 # ==================== Agent 版本管理 API ====================

@@ -4,7 +4,7 @@
 from rest_framework import serializers
 from .models import (
     Device, DeploymentTask, UpdateTask, DeviceLog, DockerImage,
-    CodePackage, Project, ProjectConfig, ProjectDeployment
+    CodePackage, Project, ProjectConfig, ProjectDeployment, DeviceConfigHistory
 )
 
 
@@ -239,5 +239,21 @@ class ProjectDeploymentSerializer(serializers.ModelSerializer):
             # 配置
             'configs': configs
         }
+
+
+class DeviceConfigHistorySerializer(serializers.ModelSerializer):
+    """设备配置历史序列化器"""
+    device_name = serializers.CharField(source='device.name', read_only=True)
+    device_id = serializers.CharField(source='device.device_id', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    
+    class Meta:
+        model = DeviceConfigHistory
+        fields = [
+            'id', 'device', 'device_name', 'device_id', 
+            'config_data', 'applied_by', 'applied_at', 
+            'status', 'status_display', 'error_message', 'is_active'
+        ]
+        read_only_fields = ['id', 'applied_at']
 
 
