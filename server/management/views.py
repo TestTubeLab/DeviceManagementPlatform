@@ -371,9 +371,21 @@ class DeviceViewSet(viewsets.ModelViewSet):
             old_logs = DeviceLog.objects.filter(device=device).order_by('-timestamp')[500:]
             DeviceLog.objects.filter(id__in=[l.id for l in old_logs]).delete()
             
+            # 噪音日志模式（过滤已知的无用日志）
+            noise_patterns = [
+                'Not Found: /login',
+                'GET /login HTTP',
+                'GET /api/metrics HTTP/1.1" 302',
+                'GET /api/health HTTP/1.1" 302',
+            ]
+            
+            def is_noise_log(line):
+                """判断是否为噪音日志"""
+                return any(pattern in line for pattern in noise_patterns)
+            
             # 存储新日志
             for line in lines:
-                if line.strip():
+                if line.strip() and not is_noise_log(line):
                     # 简单判断日志级别
                     level = 'INFO'
                     if '[ERROR]' in line or 'ERROR' in line:
@@ -382,6 +394,8 @@ class DeviceViewSet(viewsets.ModelViewSet):
                         level = 'WARNING'
                     elif '[DEBUG]' in line:
                         level = 'DEBUG'
+                    elif '[CRITICAL]' in line or 'CRITICAL' in line:
+                        level = 'CRITICAL'
                     
                     DeviceLog.objects.create(
                         device=device,

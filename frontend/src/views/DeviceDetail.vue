@@ -373,11 +373,27 @@
         <div class="logs-container" v-loading="loadingLogs">
           <div class="logs-toolbar">
             <el-button size="small" :icon="Refresh" @click="refreshLogs">刷新</el-button>
-            <el-tag size="small" type="info">最近100条日志（每分钟自动上报）</el-tag>
+            <el-select
+              v-model="logLevelFilter"
+              placeholder="筛选日志等级"
+              clearable
+              size="small"
+              style="width: 160px; margin-left: 12px"
+            >
+              <el-option label="全部" value="" />
+              <el-option label="🔴 CRITICAL" value="CRITICAL" />
+              <el-option label="🔴 ERROR" value="ERROR" />
+              <el-option label="🟡 WARNING" value="WARNING" />
+              <el-option label="🔵 INFO" value="INFO" />
+              <el-option label="🟢 DEBUG" value="DEBUG" />
+            </el-select>
+            <el-tag size="small" type="info" style="margin-left: 12px">
+              显示 {{ filteredLogs.length }} / {{ containerLogs.length }} 条
+            </el-tag>
           </div>
           <div class="logs-content" ref="logsContentRef">
             <div
-              v-for="(log, index) in containerLogs"
+              v-for="(log, index) in filteredLogs"
               :key="index"
               class="log-line"
               :class="getLogClass(log.level)"
@@ -386,7 +402,7 @@
               <span class="log-level">[{{ log.level }}]</span>
               <span class="log-message">{{ log.message }}</span>
             </div>
-            <el-empty v-if="containerLogs.length === 0 && !loadingLogs" description="暂无日志，请等待设备上报" />
+            <el-empty v-if="filteredLogs.length === 0 && !loadingLogs" description="暂无日志，请等待设备上报" />
           </div>
         </div>
       </el-dialog>
@@ -431,6 +447,13 @@ const showLogsDialog = ref(false)
 const loadingLogs = ref(false)
 const containerLogs = ref<Array<{level: string, message: string, timestamp: string}>>([])
 const logsContentRef = ref<HTMLElement | null>(null)
+const logLevelFilter = ref('')
+const filteredLogs = computed(() => {
+  if (!logLevelFilter.value) {
+    return containerLogs.value
+  }
+  return containerLogs.value.filter(log => log.level === logLevelFilter.value)
+})
 
 // 配置管理
 const showConfigDialog = ref(false)
