@@ -455,6 +455,9 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # 清洗配置数据，移除非法字符
+        config_data = self._sanitize_config(config_data)
+        
         # 创建配置历史记录
         from .models import DeviceConfigHistory
         config_history = DeviceConfigHistory.objects.create(
@@ -597,6 +600,29 @@ class DeviceViewSet(viewsets.ModelViewSet):
             return False
         
         return True
+    
+    def _sanitize_config(self, config_data):
+        """清洗配置数据，移除非法字符"""
+        import re
+        
+        def clean_string(s):
+            if not isinstance(s, str):
+                return s
+            # 只保留可打印的ASCII字符、中文字符和基本标点
+            # 移除控制字符（0x00-0x1F, 0x7F-0x9F）
+            return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', s)
+        
+        def clean_dict(d):
+            if isinstance(d, dict):
+                return {clean_string(k): clean_dict(v) for k, v in d.items()}
+            elif isinstance(d, list):
+                return [clean_dict(item) for item in d]
+            elif isinstance(d, str):
+                return clean_string(d)
+            else:
+                return d
+        
+        return clean_dict(config_data)
 
 
 # ==================== Agent 版本管理 API ====================
