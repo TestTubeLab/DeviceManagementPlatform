@@ -855,9 +855,9 @@ onMounted(() => {
   deviceStore.loadDevice(deviceId)
   loadProjects()
   
-  // 自动刷新设备状态（每3秒）
+  // 自动刷新设备状态（每3秒，静默刷新不显示loading）
   refreshTimer = setInterval(() => {
-    deviceStore.loadDevice(deviceId)
+    deviceStore.refreshDevice(deviceId)
   }, 3000)
 })
 

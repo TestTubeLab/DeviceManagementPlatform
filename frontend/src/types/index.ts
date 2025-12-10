@@ -30,6 +30,9 @@ export interface Device {
   health_check_url: string
   last_health_check: string | null
   config: Record<string, any>
+  group: string
+  tags: string[]
+  auto_deploy_project: number | null
   created_at: string
   updated_at: string
   // 动态计算字段（后端根据心跳时间实时计算）

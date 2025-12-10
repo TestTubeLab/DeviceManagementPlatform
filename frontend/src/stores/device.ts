@@ -22,14 +22,27 @@ export const useDeviceStore = defineStore('device', () => {
   }
 
   // 加载设备详情
-  const loadDevice = async (deviceId: string) => {
-    loading.value = true
+  const loadDevice = async (deviceId: string, silent = false) => {
+    if (!silent) {
+      loading.value = true
+    }
     try {
       currentDevice.value = await getDevice(deviceId)
     } catch (error) {
       console.error('加载设备详情失败:', error)
     } finally {
-      loading.value = false
+      if (!silent) {
+        loading.value = false
+      }
+    }
+  }
+
+  // 静默刷新设备状态（不显示loading）
+  const refreshDevice = async (deviceId: string) => {
+    try {
+      currentDevice.value = await getDevice(deviceId)
+    } catch (error) {
+      console.error('刷新设备状态失败:', error)
     }
   }
 
@@ -54,6 +67,7 @@ export const useDeviceStore = defineStore('device', () => {
     loading,
     loadDevices,
     loadDevice,
+    refreshDevice,
     onlineCount,
     offlineCount,
     waitingCount,
