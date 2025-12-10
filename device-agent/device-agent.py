@@ -30,14 +30,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.1.0"  # Agent 版本号，每次更新递增
+AGENT_VERSION = "1.2.0"  # Agent 版本号，每次更新递增
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
 AGENT_SCRIPT_PATH = "/opt/device-agent/agent.py"  # Agent 脚本路径
 HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "10"))  # 心跳间隔（秒）
 TASK_POLL_INTERVAL = int(os.getenv("TASK_POLL_INTERVAL", "5"))   # 任务轮询间隔（秒）
-LOG_UPLOAD_INTERVAL = int(os.getenv("LOG_UPLOAD_INTERVAL", "30")) # 日志上传间隔（秒）
+LOG_UPLOAD_INTERVAL = int(os.getenv("LOG_UPLOAD_INTERVAL", "1")) # 日志上传间隔（秒）
 UPDATE_CHECK_INTERVAL = int(os.getenv("UPDATE_CHECK_INTERVAL", "3600")) # 更新检查间隔（1小时）
 CONFIG_CHECK_INTERVAL = int(os.getenv("CONFIG_CHECK_INTERVAL", "10")) # 配置检查间隔（秒）
 
@@ -268,10 +268,23 @@ def send_heartbeat():
         **health_info
     }
     
+    # 确保所有字符串都是正确的UTF-8编码
+    def ensure_utf8(d):
+        if isinstance(d, str):
+            return d.encode('utf-8', errors='replace').decode('utf-8')
+        elif isinstance(d, dict):
+            return {k: ensure_utf8(v) for k, v in d.items()}
+        elif isinstance(d, list):
+            return [ensure_utf8(item) for item in d]
+        return d
+    
+    data = ensure_utf8(data)
+    
     try:
         resp = requests.post(
             f"{CLOUD_SERVER}/devices/{device_id}/heartbeat/",
             json=data,
+            headers={'Content-Type': 'application/json; charset=utf-8'},
             timeout=10
         )
         

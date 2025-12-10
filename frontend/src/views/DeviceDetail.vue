@@ -395,7 +395,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Refresh, Setting, Delete, Edit, Document, Camera, Connection, Monitor } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -848,10 +848,25 @@ const loadProjects = async () => {
   }
 }
 
+let refreshTimer: NodeJS.Timeout | null = null
+
 onMounted(() => {
   const deviceId = route.params.id as string
   deviceStore.loadDevice(deviceId)
   loadProjects()
+  
+  // 自动刷新设备状态（每3秒）
+  refreshTimer = setInterval(() => {
+    deviceStore.loadDevice(deviceId)
+  }, 3000)
+})
+
+onUnmounted(() => {
+  // 清除定时器
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
 })
 </script>
 
