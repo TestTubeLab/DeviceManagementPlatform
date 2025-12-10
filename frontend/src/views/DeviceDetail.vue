@@ -855,10 +855,10 @@ onMounted(() => {
   deviceStore.loadDevice(deviceId)
   loadProjects()
   
-  // 自动刷新设备状态（每3秒，静默刷新不显示loading）
+  // 自动刷新设备状态（每5秒，静默刷新不显示loading，匹配Agent心跳间隔）
   refreshTimer = setInterval(() => {
     deviceStore.refreshDevice(deviceId)
-  }, 3000)
+  }, 5000)
 })
 
 onUnmounted(() => {
