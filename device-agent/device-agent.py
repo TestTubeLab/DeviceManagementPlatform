@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.2.0"  # Agent 版本号，每次更新递增
+AGENT_VERSION = "1.2.1"  # Agent 版本号，每次更新递增
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
@@ -177,11 +177,11 @@ def collect_container_status(container_name="middleware"):
                 minutes, _ = divmod(remainder, 60)
                 
                 if days > 0:
-                    uptime = f"{days}天 {hours}小时"
+                    uptime = f"{days}d {hours}h"
                 elif hours > 0:
-                    uptime = f"{hours}小时 {minutes}分钟"
+                    uptime = f"{hours}h {minutes}m"
                 else:
-                    uptime = f"{minutes}分钟"
+                    uptime = f"{minutes}m"
             except Exception as e:
                 logger.debug(f"计算运行时长失败: {e}")
                 uptime = "运行中"
