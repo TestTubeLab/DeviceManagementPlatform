@@ -872,15 +872,29 @@ def download_and_extract_code_package(code_package_info, target_dir):
     # 确保目标目录存在
     os.makedirs(target_dir, exist_ok=True)
     
-    # 清空目标目录（保留.env配置文件）
+    # 清空目标目录（保留.env配置文件）- 增强错误处理
+    logger.info(f"清理目标目录: {target_dir}")
     for item in os.listdir(target_dir):
         item_path = os.path.join(target_dir, item)
         if item == '.env':  # 保留配置文件
             continue
-        if os.path.isdir(item_path):
-            shutil.rmtree(item_path)
-        else:
-            os.remove(item_path)
+        
+        try:
+            if os.path.isdir(item_path):
+                # 如果是目录，使用shutil.rmtree强制删除
+                shutil.rmtree(item_path, ignore_errors=True)
+                # 验证是否删除成功
+                if os.path.exists(item_path):
+                    # 如果还存在，尝试修改权限后再删除
+                    import stat
+                    os.chmod(item_path, stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+                    shutil.rmtree(item_path)
+            else:
+                os.remove(item_path)
+            logger.debug(f"  已删除: {item}")
+        except Exception as e:
+            logger.warning(f"  删除失败 {item}: {e}，尝试继续...")
+            # 不阻塞部署，继续处理其他文件
     
     # 解压代码包
     try:
@@ -1240,12 +1254,27 @@ def execute_project_deployment(deployment):
 def report_project_deployment_progress(deployment_id, **kwargs):
     """上报项目部署进度"""
     try:
-        requests.post(
+        # 确保所有字符串都是正确的UTF-8编码
+        def ensure_utf8(data):
+            if isinstance(data, str):
+                # 确保字符串是正确的UTF-8
+                return data.encode('utf-8', errors='replace').decode('utf-8')
+            elif isinstance(data, dict):
+                return {k: ensure_utf8(v) for k, v in data.items()}
+            elif isinstance(data, list):
+                return [ensure_utf8(item) for item in data]
+            return data
+        
+        clean_kwargs = ensure_utf8(kwargs)
+        
+        resp = requests.post(
             f"{CLOUD_SERVER}/project-deployments/{deployment_id}/update_progress/",
-            json=kwargs,
+            json=clean_kwargs,
+            headers={'Content-Type': 'application/json; charset=utf-8'},
             timeout=5
         )
-        logger.debug(f"上报项目部署进度: {kwargs}")
+        resp.raise_for_status()
+        logger.debug(f"上报项目部署进度: {clean_kwargs}")
     except Exception as e:
         logger.warning(f"上报项目部署进度失败: {e}")
 
