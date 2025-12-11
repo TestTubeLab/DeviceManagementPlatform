@@ -36,7 +36,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         """Agent 调用的接口不需要认证"""
-        if self.action in ['register', 'heartbeat', 'retrieve', 'list', 'upload_logs', 'pending_config', 'config_result']:
+        if self.action in ['register', 'heartbeat', 'retrieve', 'list', 'upload_logs', 'pending_config', 'config_result', 'pending_log_tasks', 'report_log_task']:
             return [AllowAny()]
         return [IsAuthenticated()]
     
@@ -637,6 +637,239 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 return d
         
         return clean_dict(config_data)
+    
+    # ==================== 日志管理辅助方法 ====================
+    def _create_log_task(self, device, task_type, params):
+        """
+        创建日志任务（无需数据库迁移）
+        存储在 Device.config['log_tasks'] 中
+        """
+        import time
+        from datetime import timedelta
+        
+        # 确保 config 存在
+        if not device.config:
+            device.config = {}
+        if 'log_tasks' not in device.config:
+            device.config['log_tasks'] = {}
+        
+        # 生成任务ID（时间戳）
+        task_id = str(int(time.time() * 1000))
+        
+        # 创建任务
+        device.config['log_tasks'][task_id] = {
+            'task_type': task_type,
+            'params': params,
+            'status': 'pending',
+            'result': {},
+            'error_message': '',
+            'created_at': timezone.now().isoformat(),
+            'completed_at': None
+        }
+        
+        # 清理7天前的已完成任务
+        seven_days_ago = timezone.now() - timedelta(days=7)
+        to_delete = []
+        for tid, task in device.config['log_tasks'].items():
+            if task['status'] in ['completed', 'failed']:
+                try:
+                    created_at = timezone.datetime.fromisoformat(task['created_at'])
+                    if created_at < seven_days_ago:
+                        to_delete.append(tid)
+                except:
+                    pass
+        
+        for tid in to_delete:
+            del device.config['log_tasks'][tid]
+        
+        device.save()
+        
+        return task_id
+    
+    def _get_log_task(self, device, task_id):
+        """获取日志任务"""
+        if not device.config or 'log_tasks' not in device.config:
+            return None
+        return device.config['log_tasks'].get(str(task_id))
+    
+    def _update_log_task(self, device, task_id, task_status, result=None, error_message=''):
+        """更新日志任务状态"""
+        if not device.config or 'log_tasks' not in device.config:
+            return False
+        
+        task_id_str = str(task_id)
+        if task_id_str not in device.config['log_tasks']:
+            return False
+        
+        device.config['log_tasks'][task_id_str]['status'] = task_status
+        if result is not None:
+            device.config['log_tasks'][task_id_str]['result'] = result
+        if error_message:
+            device.config['log_tasks'][task_id_str]['error_message'] = error_message
+        if task_status in ['completed', 'failed']:
+            device.config['log_tasks'][task_id_str]['completed_at'] = timezone.now().isoformat()
+        
+        device.save()
+        return True
+    
+    # ==================== 日志管理 API ====================
+    @action(detail=True, methods=['post'])
+    def list_logs(self, request, device_id=None):
+        """
+        列出设备日志文件
+        POST /api/devices/{device_id}/list_logs/
+        Body: {"date": "2025-12-10"}  # 可选
+        """
+        device = self.get_object()
+        date = request.data.get('date')
+        
+        task_id = self._create_log_task(device, 'list', {'date': date} if date else {})
+        
+        return Response({
+            'task_id': task_id,
+            'message': '日志列表任务已创建'
+        })
+    
+    @action(detail=True, methods=['post'])
+    def read_log(self, request, device_id=None):
+        """
+        读取日志文件内容
+        POST /api/devices/{device_id}/read_log/
+        Body: {"date": "2025-12-10", "file": "14h48m.log", "lines": 500, "tail": true}
+        """
+        device = self.get_object()
+        date = request.data.get('date')
+        file = request.data.get('file')
+        lines = request.data.get('lines', 0)
+        tail = request.data.get('tail', False)
+        
+        if not date or not file:
+            return Response({'error': 'date和file参数必填'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        task_id = self._create_log_task(device, 'read', {
+            'date': date,
+            'file': file,
+            'lines': lines,
+            'tail': tail
+        })
+        
+        return Response({'task_id': task_id, 'message': '日志读取任务已创建'})
+    
+    @action(detail=True, methods=['post'])
+    def search_logs(self, request, device_id=None):
+        """
+        搜索日志内容
+        POST /api/devices/{device_id}/search_logs/
+        Body: {"keyword": "ERROR", "start_date": "2025-12-01", "end_date": "2025-12-10", "level": "ERROR"}
+        """
+        device = self.get_object()
+        keyword = request.data.get('keyword')
+        
+        if not keyword:
+            return Response({'error': 'keyword参数必填'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        task_id = self._create_log_task(device, 'search', {
+            'keyword': keyword,
+            'start_date': request.data.get('start_date'),
+            'end_date': request.data.get('end_date'),
+            'level': request.data.get('level'),
+            'case_sensitive': request.data.get('case_sensitive', False)
+        })
+        
+        return Response({'task_id': task_id, 'message': '日志搜索任务已创建'})
+    
+    @action(detail=True, methods=['get'])
+    def log_task_result(self, request, device_id=None):
+        """
+        查询日志任务结果
+        GET /api/devices/{device_id}/log_task_result/?task_id=1702345678123
+        """
+        device = self.get_object()
+        task_id = request.query_params.get('task_id')
+        
+        if not task_id:
+            return Response({'error': 'task_id参数必填'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        task = self._get_log_task(device, task_id)
+        
+        if not task:
+            return Response({'error': '任务不存在'}, status=status.HTTP_404_NOT_FOUND)
+        
+        return Response({
+            'task_id': task_id,
+            'task_type': task['task_type'],
+            'status': task['status'],
+            'result': task['result'],
+            'error_message': task['error_message'],
+            'created_at': task['created_at'],
+            'completed_at': task['completed_at']
+        })
+    
+    @action(detail=True, methods=['get'], permission_classes=[AllowAny])
+    def pending_log_tasks(self, request, device_id=None):
+        """
+        Agent轮询待执行的日志任务
+        GET /api/devices/{device_id}/pending_log_tasks/
+        """
+        device = self.get_object()
+        
+        if not device.config or 'log_tasks' not in device.config:
+            return Response({'tasks': []})
+        
+        # 获取所有pending状态的任务
+        pending_tasks = []
+        for task_id, task in device.config['log_tasks'].items():
+            if task['status'] == 'pending':
+                pending_tasks.append({
+                    'task_id': task_id,
+                    'task_type': task['task_type'],
+                    'params': task['params']
+                })
+                # 标记为processing
+                device.config['log_tasks'][task_id]['status'] = 'processing'
+        
+        if pending_tasks:
+            device.save()
+        
+        return Response({'tasks': pending_tasks[:5]})  # 最多返回5个
+    
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
+    def report_log_task(self, request, device_id=None):
+        """
+        Agent上报日志任务执行结果
+        POST /api/devices/{device_id}/report_log_task/
+        Body: {"task_id": "1702345678123", "status": "completed", "result": {...}, "error_message": ""}
+        """
+        device = self.get_object()
+        task_id = request.data.get('task_id')
+        task_status = request.data.get('status')
+        result = request.data.get('result', {})
+        error_message = request.data.get('error_message', '')
+        
+        success = self._update_log_task(device, task_id, task_status, result, error_message)
+        
+        if success:
+            return Response({'message': '任务结果已更新'})
+        else:
+            return Response({'error': '任务不存在'}, status=status.HTTP_404_NOT_FOUND)
+    
+    @action(detail=True, methods=['post'])
+    def download_log(self, request, device_id=None):
+        """
+        下载日志文件
+        POST /api/devices/{device_id}/download_log/
+        Body: {"date": "2025-12-10", "files": ["14h48m.log", "15h20m.log"]}
+        """
+        device = self.get_object()
+        date = request.data.get('date')
+        files = request.data.get('files', [])
+        
+        if not date or not files:
+            return Response({'error': 'date和files参数必填'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        task_id = self._create_log_task(device, 'download', {'date': date, 'files': files})
+        
+        return Response({'task_id': task_id, 'message': '日志下载任务已创建'})
 
 
 # ==================== Agent 版本管理 API ====================
