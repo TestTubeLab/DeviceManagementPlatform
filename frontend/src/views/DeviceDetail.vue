@@ -226,7 +226,7 @@
         <el-space>
           <el-button type="primary" :icon="Refresh" @click="handleRestart">重启容器</el-button>
           <el-button type="success" :icon="Document" @click="handleViewLogs">查看日志</el-button>
-          <el-button type="warning" :icon="FolderOpened" @click="showLogsDialog = true">日志中心</el-button>
+          <el-button type="warning" :icon="FolderOpened" @click="showLogsCenterDialog = true">日志中心</el-button>
           <el-button :icon="Setting" @click="showConfigDialog = true">配置管理</el-button>
           <el-button :icon="Delete" type="danger" @click="handleDelete">删除设备</el-button>
         </el-space>
