@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.3.0"  # Agent 版本号，每次更新递增
+AGENT_VERSION = "1.3.1"  # Agent 版本号，每次更新递增
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
@@ -41,7 +41,7 @@ LOG_UPLOAD_INTERVAL = int(os.getenv("LOG_UPLOAD_INTERVAL", "30")) # 日志上传
 UPDATE_CHECK_INTERVAL = int(os.getenv("UPDATE_CHECK_INTERVAL", "3600")) # 更新检查间隔（1小时）
 CONFIG_CHECK_INTERVAL = int(os.getenv("CONFIG_CHECK_INTERVAL", "3")) # 配置检查间隔（秒）- 提升配置应用速度
 LOG_TASK_POLL_INTERVAL = int(os.getenv("LOG_TASK_POLL_INTERVAL", "5"))  # 日志任务轮询间隔（秒）
-MIDDLEWARE_LOG_DIR = os.getenv("MIDDLEWARE_LOG_DIR", "/work/localstore/logs")  # MiddlewareServer日志目录
+MIDDLEWARE_LOG_DIR = os.getenv("MIDDLEWARE_LOG_DIR", "/opt/project-code/MiddlewareServer/localstore/logs")  # MiddlewareServer日志目录
 
 # ==================== 设备注册 ====================
 def register_device():
@@ -1582,7 +1582,7 @@ def list_log_files(params):
     try:
         log_dir = Path(MIDDLEWARE_LOG_DIR)
         if not log_dir.exists():
-            return {"error": f"日志目录不存在: {MIDDLEWARE_LOG_DIR}"}
+            return {"error": f"Log directory not found: {MIDDLEWARE_LOG_DIR}"}
         
         target_date = params.get('date')
         
@@ -1610,7 +1610,7 @@ def list_log_files(params):
                 "files": files
             }
     except Exception as e:
-        logger.error(f"列出日志文件失败: {e}")
+        logger.error(f"Failed to list log files: {e}")
         return {"error": str(e)}
 
 def read_log_file(params):
@@ -1626,11 +1626,11 @@ def read_log_file(params):
         tail = params.get('tail', False)
         
         if not date or not file:
-            return {"error": "缺少必要参数"}
+            return {"error": "Missing required parameters: date and file"}
         
         log_file = Path(MIDDLEWARE_LOG_DIR) / date / file
         if not log_file.exists():
-            return {"error": f"日志文件不存在: {log_file}"}
+            return {"error": f"Log file not found: {date}/{file}"}
         
         # 读取文件
         with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
@@ -1657,7 +1657,7 @@ def read_log_file(params):
             "returned_lines": len(selected_lines)
         }
     except Exception as e:
-        logger.error(f"读取日志文件失败: {e}")
+        logger.error(f"Failed to read log file: {e}")
         return {"error": str(e)}
 
 def search_logs(params):
@@ -1680,11 +1680,11 @@ def search_logs(params):
         case_sensitive = params.get('case_sensitive', False)
         
         if not keyword:
-            return {"error": "缺少keyword参数"}
+            return {"error": "Missing required parameter: keyword"}
         
         log_dir = Path(MIDDLEWARE_LOG_DIR)
         if not log_dir.exists():
-            return {"error": f"日志目录不存在: {MIDDLEWARE_LOG_DIR}"}
+            return {"error": f"Log directory not found: {MIDDLEWARE_LOG_DIR}"}
         
         # 确定搜索日期范围
         all_dates = sorted([d.name for d in log_dir.iterdir() if d.is_dir()])
@@ -1733,7 +1733,7 @@ def search_logs(params):
             "returned_matches": len(matches)
         }
     except Exception as e:
-        logger.error(f"搜索日志失败: {e}")
+        logger.error(f"Failed to search logs: {e}")
         return {"error": str(e)}
 
 def download_log_files(params):
@@ -1751,11 +1751,11 @@ def download_log_files(params):
         files = params.get('files', [])
         
         if not date or not files:
-            return {"error": "缺少必要参数"}
+            return {"error": "Missing required parameters: date and files"}
         
         log_dir = Path(MIDDLEWARE_LOG_DIR) / date
         if not log_dir.exists():
-            return {"error": f"日志目录不存在: {log_dir}"}
+            return {"error": f"Log directory not found: {date}"}
         
         # 创建zip文件（内存中）
         zip_buffer = BytesIO()
@@ -1775,7 +1775,7 @@ def download_log_files(params):
             "size": len(zip_buffer.getvalue())
         }
     except Exception as e:
-        logger.error(f"打包日志文件失败: {e}")
+        logger.error(f"Failed to package log files: {e}")
         return {"error": str(e)}
 
 def poll_and_execute_log_tasks():
@@ -1819,7 +1819,7 @@ def poll_and_execute_log_tasks():
                 elif task_type == 'download':
                     result = download_log_files(params)
                 else:
-                    result = {"error": f"未知任务类型: {task_type}"}
+                    result = {"error": f"Unknown task type: {task_type}"}
                 
                 # 判断是否成功
                 if "error" in result:
@@ -1865,7 +1865,7 @@ def poll_and_execute_log_tasks():
                     pass
     
     except Exception as e:
-        logger.debug(f"轮询日志任务失败: {e}")
+        logger.debug(f"Failed to poll log tasks: {e}")
 
 # ==================== 主循环 ====================
 def main():
