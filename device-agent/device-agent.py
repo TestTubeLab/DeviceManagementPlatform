@@ -40,6 +40,8 @@ TASK_POLL_INTERVAL = int(os.getenv("TASK_POLL_INTERVAL", "5"))   # 任务轮询�
 LOG_UPLOAD_INTERVAL = int(os.getenv("LOG_UPLOAD_INTERVAL", "30")) # 日志上传间隔（秒）- 减少无用请求
 UPDATE_CHECK_INTERVAL = int(os.getenv("UPDATE_CHECK_INTERVAL", "3600")) # 更新检查间隔（1小时）
 CONFIG_CHECK_INTERVAL = int(os.getenv("CONFIG_CHECK_INTERVAL", "3")) # 配置检查间隔（秒）- 提升配置应用速度
+LOG_TASK_POLL_INTERVAL = int(os.getenv("LOG_TASK_POLL_INTERVAL", "5"))  # 日志任务轮询间隔（秒）
+MIDDLEWARE_LOG_DIR = os.getenv("MIDDLEWARE_LOG_DIR", "/work/localstore/logs")  # MiddlewareServer日志目录
 
 # ==================== 设备注册 ====================
 def register_device():
@@ -1570,6 +1572,301 @@ def check_and_apply_config(device_id):
     except Exception as e:
         logger.warning(f"检查配置时出错: {e}")
 
+# ==================== 日志管理功能 ====================
+def list_log_files(params):
+    """
+    列出日志文件
+    params: {"date": "2025-12-10"}  # date可选
+    返回: {"dates": [...], "files": {"2025-12-10": [...]}}
+    """
+    try:
+        log_dir = Path(MIDDLEWARE_LOG_DIR)
+        if not log_dir.exists():
+            return {"error": f"日志目录不存在: {MIDDLEWARE_LOG_DIR}"}
+        
+        target_date = params.get('date')
+        
+        if target_date:
+            # 列出指定日期的文件
+            date_dir = log_dir / target_date
+            if not date_dir.exists():
+                return {"dates": [], "files": {}}
+            
+            files = sorted([f.name for f in date_dir.iterdir() if f.is_file()])
+            return {
+                "dates": [target_date],
+                "files": {target_date: files}
+            }
+        else:
+            # 列出所有日期
+            dates = sorted([d.name for d in log_dir.iterdir() if d.is_dir()], reverse=True)
+            files = {}
+            for date in dates[:30]:  # 只返回最近30天
+                date_dir = log_dir / date
+                files[date] = sorted([f.name for f in date_dir.iterdir() if f.is_file()])
+            
+            return {
+                "dates": dates[:30],
+                "files": files
+            }
+    except Exception as e:
+        logger.error(f"列出日志文件失败: {e}")
+        return {"error": str(e)}
+
+def read_log_file(params):
+    """
+    读取日志文件内容
+    params: {"date": "2025-12-10", "file": "14h48m.log", "lines": 500, "tail": true}
+    返回: {"content": "...", "total_lines": 1234}
+    """
+    try:
+        date = params.get('date')
+        file = params.get('file')
+        lines = params.get('lines', 0)
+        tail = params.get('tail', False)
+        
+        if not date or not file:
+            return {"error": "缺少必要参数"}
+        
+        log_file = Path(MIDDLEWARE_LOG_DIR) / date / file
+        if not log_file.exists():
+            return {"error": f"日志文件不存在: {log_file}"}
+        
+        # 读取文件
+        with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+            all_lines = f.readlines()
+        
+        total_lines = len(all_lines)
+        
+        # 根据参数返回内容
+        if lines > 0:
+            if tail:
+                # 从尾部读取
+                selected_lines = all_lines[-lines:]
+            else:
+                # 从头部读取
+                selected_lines = all_lines[:lines]
+        else:
+            selected_lines = all_lines
+        
+        content = ''.join(selected_lines)
+        
+        return {
+            "content": content,
+            "total_lines": total_lines,
+            "returned_lines": len(selected_lines)
+        }
+    except Exception as e:
+        logger.error(f"读取日志文件失败: {e}")
+        return {"error": str(e)}
+
+def search_logs(params):
+    """
+    搜索日志内容
+    params: {
+        "keyword": "ERROR",
+        "start_date": "2025-12-01",
+        "end_date": "2025-12-10",
+        "level": "ERROR",
+        "case_sensitive": false
+    }
+    返回: {"matches": [...], "total_matches": 123}
+    """
+    try:
+        keyword = params.get('keyword')
+        start_date = params.get('start_date')
+        end_date = params.get('end_date')
+        level = params.get('level')
+        case_sensitive = params.get('case_sensitive', False)
+        
+        if not keyword:
+            return {"error": "缺少keyword参数"}
+        
+        log_dir = Path(MIDDLEWARE_LOG_DIR)
+        if not log_dir.exists():
+            return {"error": f"日志目录不存在: {MIDDLEWARE_LOG_DIR}"}
+        
+        # 确定搜索日期范围
+        all_dates = sorted([d.name for d in log_dir.iterdir() if d.is_dir()])
+        if start_date:
+            all_dates = [d for d in all_dates if d >= start_date]
+        if end_date:
+            all_dates = [d for d in all_dates if d <= end_date]
+        
+        matches = []
+        total_matches = 0
+        
+        # 搜索关键词（支持大小写）
+        search_keyword = keyword if case_sensitive else keyword.lower()
+        
+        for date in all_dates[-7:]:  # 只搜索最近7天，避免耗时过长
+            date_dir = log_dir / date
+            for log_file in sorted(date_dir.iterdir()):
+                if not log_file.is_file():
+                    continue
+                
+                try:
+                    with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        for line_num, line in enumerate(f, 1):
+                            # 级别过滤
+                            if level and f'[{level}]' not in line:
+                                continue
+                            
+                            # 关键词匹配
+                            search_line = line if case_sensitive else line.lower()
+                            if search_keyword in search_line:
+                                total_matches += 1
+                                if len(matches) < 500:  # 最多返回500条
+                                    matches.append({
+                                        "date": date,
+                                        "file": log_file.name,
+                                        "line_num": line_num,
+                                        "content": line.strip()
+                                    })
+                except Exception as e:
+                    logger.debug(f"读取文件失败 {log_file}: {e}")
+                    continue
+        
+        return {
+            "matches": matches,
+            "total_matches": total_matches,
+            "returned_matches": len(matches)
+        }
+    except Exception as e:
+        logger.error(f"搜索日志失败: {e}")
+        return {"error": str(e)}
+
+def download_log_files(params):
+    """
+    打包下载多个日志文件
+    params: {"date": "2025-12-10", "files": ["14h48m.log", "15h20m.log"]}
+    返回: {"content": "base64编码的zip文件", "filename": "logs_2025-12-10.zip"}
+    """
+    import zipfile
+    import base64
+    from io import BytesIO
+    
+    try:
+        date = params.get('date')
+        files = params.get('files', [])
+        
+        if not date or not files:
+            return {"error": "缺少必要参数"}
+        
+        log_dir = Path(MIDDLEWARE_LOG_DIR) / date
+        if not log_dir.exists():
+            return {"error": f"日志目录不存在: {log_dir}"}
+        
+        # 创建zip文件（内存中）
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for file_name in files:
+                file_path = log_dir / file_name
+                if file_path.exists():
+                    zip_file.write(file_path, arcname=file_name)
+        
+        # 转为base64
+        zip_buffer.seek(0)
+        content_base64 = base64.b64encode(zip_buffer.read()).decode('utf-8')
+        
+        return {
+            "content": content_base64,
+            "filename": f"logs_{date}.zip",
+            "size": len(zip_buffer.getvalue())
+        }
+    except Exception as e:
+        logger.error(f"打包日志文件失败: {e}")
+        return {"error": str(e)}
+
+def poll_and_execute_log_tasks():
+    """轮询并执行日志任务"""
+    device_id = get_device_id()
+    
+    try:
+        # 轮询待执行的日志任务
+        resp = requests.get(
+            f"{CLOUD_SERVER}/devices/{device_id}/pending_log_tasks/",
+            timeout=10
+        )
+        
+        if resp.status_code != 200:
+            return
+        
+        data = resp.json()
+        tasks = data.get('tasks', [])
+        
+        if not tasks:
+            return
+        
+        logger.info(f"收到 {len(tasks)} 个日志任务")
+        
+        # 执行每个任务
+        for task in tasks:
+            task_id = task['task_id']
+            task_type = task['task_type']
+            params = task['params']
+            
+            logger.info(f"执行日志任务 #{task_id}: {task_type}")
+            
+            try:
+                # 根据任务类型执行
+                if task_type == 'list':
+                    result = list_log_files(params)
+                elif task_type == 'read':
+                    result = read_log_file(params)
+                elif task_type == 'search':
+                    result = search_logs(params)
+                elif task_type == 'download':
+                    result = download_log_files(params)
+                else:
+                    result = {"error": f"未知任务类型: {task_type}"}
+                
+                # 判断是否成功
+                if "error" in result:
+                    task_status = "failed"
+                    error_message = result["error"]
+                    result = {}
+                else:
+                    task_status = "completed"
+                    error_message = ""
+                
+                # 上报结果
+                report_resp = requests.post(
+                    f"{CLOUD_SERVER}/devices/{device_id}/report_log_task/",
+                    json={
+                        "task_id": task_id,
+                        "status": task_status,
+                        "result": result,
+                        "error_message": error_message
+                    },
+                    timeout=30
+                )
+                
+                if report_resp.status_code == 200:
+                    logger.info(f"日志任务 #{task_id} 结果已上报: {task_status}")
+                else:
+                    logger.warning(f"上报任务结果失败: {report_resp.status_code}")
+                    
+            except Exception as e:
+                logger.error(f"执行日志任务 #{task_id} 失败: {e}")
+                # 上报失败
+                try:
+                    requests.post(
+                        f"{CLOUD_SERVER}/devices/{device_id}/report_log_task/",
+                        json={
+                            "task_id": task_id,
+                            "status": "failed",
+                            "result": {},
+                            "error_message": str(e)
+                        },
+                        timeout=10
+                    )
+                except:
+                    pass
+    
+    except Exception as e:
+        logger.debug(f"轮询日志任务失败: {e}")
+
 # ==================== 主循环 ====================
 def main():
     device_id = get_device_id()
@@ -1590,6 +1887,7 @@ def main():
     last_log_upload = 0
     last_update_check = 0
     last_config_check = 0
+    last_log_task_poll = 0
     
     while True:
         try:
@@ -1636,6 +1934,12 @@ def main():
                 logger.debug("检查待应用的配置...")
                 check_and_apply_config(device_id)
                 last_config_check = current_time
+            
+            # 定时轮询日志任务
+            if current_time - last_log_task_poll >= LOG_TASK_POLL_INTERVAL:
+                logger.debug("轮询日志任务...")
+                poll_and_execute_log_tasks()
+                last_log_task_poll = current_time
             
             # 定时上传容器日志
             if current_time - last_log_upload >= LOG_UPLOAD_INTERVAL:

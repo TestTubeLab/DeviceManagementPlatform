@@ -127,3 +127,70 @@ export const rollbackConfig = (deviceId: string, configId: number) => {
   )
 }
 
+// ==================== 日志管理 API ====================
+
+// 日志任务类型
+export interface LogTask {
+  task_id: number
+  task_type: 'list' | 'read' | 'search' | 'download'
+  status: 'pending' | 'processing' | 'completed' | 'failed'
+  result: any
+  error_message: string
+  created_at: string
+  completed_at: string | null
+}
+
+// 列出日志文件
+export const listLogs = (deviceId: string, date?: string) => {
+  return request.post<any, { task_id: number, message: string }>(
+    `/devices/${deviceId}/list_logs/`,
+    { date }
+  )
+}
+
+// 读取日志内容
+export const readLog = (deviceId: string, params: {
+  date: string
+  file: string
+  lines?: number
+  tail?: boolean
+}) => {
+  return request.post<any, { task_id: number, message: string }>(
+    `/devices/${deviceId}/read_log/`,
+    params
+  )
+}
+
+// 搜索日志
+export const searchLogs = (deviceId: string, params: {
+  keyword: string
+  start_date?: string
+  end_date?: string
+  level?: string
+  case_sensitive?: boolean
+}) => {
+  return request.post<any, { task_id: number, message: string }>(
+    `/devices/${deviceId}/search_logs/`,
+    params
+  )
+}
+
+// 下载日志
+export const downloadLog = (deviceId: string, params: {
+  date: string
+  files: string[]
+}) => {
+  return request.post<any, { task_id: number, message: string }>(
+    `/devices/${deviceId}/download_log/`,
+    params
+  )
+}
+
+// 查询日志任务结果
+export const getLogTaskResult = (deviceId: string, taskId: number) => {
+  return request.get<any, LogTask>(
+    `/devices/${deviceId}/log_task_result/`,
+    { params: { task_id: taskId } }
+  )
+}
+

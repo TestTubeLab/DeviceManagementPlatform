@@ -226,6 +226,7 @@
         <el-space>
           <el-button type="primary" :icon="Refresh" @click="handleRestart">重启容器</el-button>
           <el-button type="success" :icon="Document" @click="handleViewLogs">查看日志</el-button>
+          <el-button type="warning" :icon="FolderOpened" @click="showLogsDialog = true">日志中心</el-button>
           <el-button :icon="Setting" @click="showConfigDialog = true">配置管理</el-button>
           <el-button :icon="Delete" type="danger" @click="handleDelete">删除设备</el-button>
         </el-space>
@@ -406,6 +407,158 @@
           </div>
         </div>
       </el-dialog>
+      
+      <!-- 日志中心对话框 -->
+      <el-dialog 
+        v-model="showLogsCenterDialog" 
+        title="日志中心" 
+        width="90%" 
+        top="5vh"
+        :close-on-click-modal="false"
+      >
+        <div class="logs-center">
+          <!-- 左侧：日期和文件列表 -->
+          <div class="logs-sidebar">
+            <div class="sidebar-header">
+              <el-button 
+                type="primary" 
+                :icon="Refresh" 
+                @click="loadLogDates" 
+                :loading="loadingDates"
+                size="small"
+              >
+                刷新列表
+              </el-button>
+            </div>
+            
+            <el-scrollbar height="600px">
+              <el-tree
+                :data="logTree"
+                :props="{ label: 'label', children: 'children' }"
+                @node-click="handleLogNodeClick"
+                :highlight-current="true"
+                node-key="id"
+              >
+                <template #default="{ data }">
+                  <span class="tree-node">
+                    <el-icon v-if="data.type === 'date'"><Calendar /></el-icon>
+                    <el-icon v-else><Document /></el-icon>
+                    <span>{{ data.label }}</span>
+                    <el-tag v-if="data.type === 'file' && data.special" type="warning" size="small">特殊</el-tag>
+                  </span>
+                </template>
+              </el-tree>
+            </el-scrollbar>
+          </div>
+          
+          <!-- 右侧：日志内容 -->
+          <div class="logs-main">
+            <!-- 工具栏 -->
+            <div class="logs-toolbar">
+              <el-space>
+                <!-- 搜索框 -->
+                <el-input
+                  v-model="logSearchKeyword"
+                  placeholder="搜索关键词"
+                  :prefix-icon="Search"
+                  style="width: 200px"
+                  clearable
+                />
+                
+                <!-- 日志级别筛选 -->
+                <el-select v-model="logLevelFilter" placeholder="日志级别" clearable style="width: 120px">
+                  <el-option label="INFO" value="INFO" />
+                  <el-option label="WARNING" value="WARNING" />
+                  <el-option label="ERROR" value="ERROR" />
+                  <el-option label="DEBUG" value="DEBUG" />
+                  <el-option label="CRITICAL" value="CRITICAL" />
+                </el-select>
+                
+                <!-- 搜索按钮 -->
+                <el-button 
+                  type="primary" 
+                  :icon="Search" 
+                  @click="handleSearchLogs"
+                  :loading="searchingLogs"
+                >
+                  搜索
+                </el-button>
+              </el-space>
+              
+              <el-space>
+                <!-- 行数限制 -->
+                <el-input-number 
+                  v-model="logLines" 
+                  :min="0" 
+                  :max="10000" 
+                  :step="100"
+                  controls-position="right"
+                  style="width: 150px"
+                />
+                <span>行（0=全部）</span>
+                
+                <!-- 从尾部读取 -->
+                <el-checkbox v-model="logTail">尾部读取</el-checkbox>
+                
+                <!-- 下载按钮 -->
+                <el-button 
+                  :icon="Download" 
+                  @click="handleDownloadLog"
+                  :disabled="!currentLogFile"
+                >
+                  下载
+                </el-button>
+              </el-space>
+            </div>
+            
+            <!-- 日志内容显示 -->
+            <div v-loading="loadingLogContent" class="logs-content-panel">
+              <div v-if="!currentLogFile" class="empty-hint">
+                <el-empty description="请从左侧选择日志文件" />
+              </div>
+              
+              <div v-else-if="searchMode" class="search-results">
+                <div class="search-info">
+                  <span>搜索结果：找到 {{ searchResults.total_matches }} 条匹配</span>
+                  <span v-if="searchResults.total_matches > searchResults.returned_matches">
+                    （显示前 {{ searchResults.returned_matches }} 条）
+                  </span>
+                </div>
+                
+                <div 
+                  v-for="(match, index) in searchResults.matches" 
+                  :key="index"
+                  class="search-result-item"
+                >
+                  <div class="result-meta">
+                    <el-tag size="small">{{ match.date }}</el-tag>
+                    <el-tag size="small" type="info">{{ match.file }}</el-tag>
+                    <span class="line-num">Line {{ match.line_num }}</span>
+                  </div>
+                  <div class="result-content" v-html="highlightKeyword(match.content)"></div>
+                </div>
+              </div>
+              
+              <div v-else ref="logContentRef" class="logs-content">
+                <div v-if="logContent" class="log-text">
+                  <pre>{{ logContent }}</pre>
+                </div>
+                <el-empty v-else description="日志为空" />
+              </div>
+            </div>
+            
+            <!-- 底部信息栏 -->
+            <div class="logs-footer">
+              <span v-if="currentLogFile">
+                当前文件：{{ currentLogDate }}/{{ currentLogFile }}
+              </span>
+              <span v-if="logTotalLines > 0">
+                总行数：{{ logTotalLines }} | 显示：{{ logReturnedLines }} 行
+              </span>
+            </div>
+          </div>
+        </div>
+      </el-dialog>
     </div>
   </div>
 </template>
@@ -413,12 +566,13 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Refresh, Setting, Delete, Edit, Document, Camera, Connection, Monitor } from '@element-plus/icons-vue'
+import { Refresh, Setting, Delete, Edit, Document, Camera, Connection, Monitor, Calendar, Search, Download, FolderOpened } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDeviceStore } from '@/stores/device'
 import { 
   restartDevice, deleteDevice, updateDevice, getContainerLogs, updateAgent,
   getCurrentConfig, applyConfig, getConfigHistory, rollbackConfig,
+  listLogs, readLog, searchLogs, downloadLog, getLogTaskResult,
   type DeviceConfig, type ConfigHistory 
 } from '@/api/device'
 import { getProjects } from '@/api/project'
@@ -474,6 +628,31 @@ const config = ref<DeviceConfig>({
   backend: { host: '127.0.0.1', port: 8088 }
 })
 const configHistory = ref<ConfigHistory[]>([])
+
+// 日志中心相关
+const showLogsCenterDialog = ref(false)
+const loadingDates = ref(false)
+const loadingLogContent = ref(false)
+const searchingLogs = ref(false)
+
+// 日志树数据
+const logTree = ref<any[]>([])
+const currentLogDate = ref('')
+const currentLogFile = ref('')
+
+// 日志内容
+const logContent = ref('')
+const logTotalLines = ref(0)
+const logReturnedLines = ref(0)
+
+// 搜索相关
+const logSearchKeyword = ref('')
+const logLines = ref(500)
+const logTail = ref(true)
+const searchMode = ref(false)
+const searchResults = ref<any>({ matches: [], total_matches: 0, returned_matches: 0 })
+
+const logContentRef = ref<HTMLElement | null>(null)
 
 // 监听device变化，更新自动部署项目和分组
 watch(device, (newDevice) => {
@@ -891,6 +1070,203 @@ onUnmounted(() => {
     refreshTimer = null
   }
 })
+
+// ==================== 日志中心功能 ====================
+
+// 加载日志日期列表
+const loadLogDates = async () => {
+  if (!device.value) return
+  
+  loadingDates.value = true
+  try {
+    // 创建列表任务
+    const { task_id } = await listLogs(device.value.device_id)
+    
+    // 轮询任务结果
+    const result = await pollTaskResult(task_id)
+    
+    if (result.status === 'completed') {
+      const { dates, files } = result.result
+      
+      // 构建树形结构
+      logTree.value = dates.map((date: string) => ({
+        id: `date_${date}`,
+        label: date,
+        type: 'date',
+        children: files[date]?.map((file: string) => ({
+          id: `file_${date}_${file}`,
+          label: file,
+          type: 'file',
+          date: date,
+          file: file,
+          special: file === 'FileCleaner.log' || file === '00h00m.log'
+        })) || []
+      }))
+      
+      ElMessage.success('日志列表加载成功')
+    } else {
+      ElMessage.error(result.error_message || '加载日志列表失败')
+    }
+  } catch (error) {
+    ElMessage.error('加载日志列表失败')
+  } finally {
+    loadingDates.value = false
+  }
+}
+
+// 点击树节点
+const handleLogNodeClick = async (data: any) => {
+  if (data.type === 'file') {
+    await loadLogContent(data.date, data.file)
+  }
+}
+
+// 加载日志内容
+const loadLogContent = async (date: string, file: string) => {
+  if (!device.value) return
+  
+  searchMode.value = false
+  currentLogDate.value = date
+  currentLogFile.value = file
+  loadingLogContent.value = true
+  
+  try {
+    const { task_id } = await readLog(device.value.device_id, {
+      date,
+      file,
+      lines: logLines.value,
+      tail: logTail.value
+    })
+    
+    const result = await pollTaskResult(task_id)
+    
+    if (result.status === 'completed') {
+      logContent.value = result.result.content
+      logTotalLines.value = result.result.total_lines
+      logReturnedLines.value = result.result.returned_lines
+      
+      // 滚动到底部（如果是tail模式）
+      if (logTail.value) {
+        setTimeout(() => {
+          if (logContentRef.value) {
+            logContentRef.value.scrollTop = logContentRef.value.scrollHeight
+          }
+        }, 100)
+      }
+    } else {
+      ElMessage.error(result.error_message || '读取日志失败')
+    }
+  } catch (error) {
+    ElMessage.error('读取日志失败')
+  } finally {
+    loadingLogContent.value = false
+  }
+}
+
+// 搜索日志
+const handleSearchLogs = async () => {
+  if (!device.value || !logSearchKeyword.value) {
+    ElMessage.warning('请输入搜索关键词')
+    return
+  }
+  
+  searchMode.value = true
+  searchingLogs.value = true
+  
+  try {
+    const { task_id } = await searchLogs(device.value.device_id, {
+      keyword: logSearchKeyword.value,
+      level: logLevelFilter.value,
+      case_sensitive: false
+    })
+    
+    const result = await pollTaskResult(task_id)
+    
+    if (result.status === 'completed') {
+      searchResults.value = result.result
+      ElMessage.success(`找到 ${result.result.total_matches} 条匹配`)
+    } else {
+      ElMessage.error(result.error_message || '搜索失败')
+    }
+  } catch (error) {
+    ElMessage.error('搜索失败')
+  } finally {
+    searchingLogs.value = false
+  }
+}
+
+// 下载日志
+const handleDownloadLog = async () => {
+  if (!device.value || !currentLogDate.value || !currentLogFile.value) return
+  
+  try {
+    const { task_id } = await downloadLog(device.value.device_id, {
+      date: currentLogDate.value,
+      files: [currentLogFile.value]
+    })
+    
+    ElMessage.info('正在准备下载...')
+    
+    const result = await pollTaskResult(task_id, 30000)  // 30秒超时
+    
+    if (result.status === 'completed') {
+      // Base64解码并下载
+      const { content, filename } = result.result
+      const binaryString = atob(content)
+      const bytes = new Uint8Array(binaryString.length)
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+      const blob = new Blob([bytes], { type: 'application/zip' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(url)
+      
+      ElMessage.success('下载成功')
+    } else {
+      ElMessage.error(result.error_message || '下载失败')
+    }
+  } catch (error) {
+    ElMessage.error('下载失败')
+  }
+}
+
+// 轮询任务结果（通用函数）
+const pollTaskResult = async (taskId: number, timeout: number = 10000): Promise<any> => {
+  if (!device.value) throw new Error('设备不存在')
+  
+  const startTime = Date.now()
+  
+  while (Date.now() - startTime < timeout) {
+    const result = await getLogTaskResult(device.value.device_id, taskId)
+    
+    if (result.status === 'completed' || result.status === 'failed') {
+      return result
+    }
+    
+    // 等待1秒后重试
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+  
+  throw new Error('任务超时')
+}
+
+// 高亮关键词
+const highlightKeyword = (text: string) => {
+  if (!logSearchKeyword.value) return text
+  const regex = new RegExp(`(${logSearchKeyword.value})`, 'gi')
+  return text.replace(regex, '<mark>$1</mark>')
+}
+
+// 监听对话框打开
+watch(showLogsCenterDialog, (newVal) => {
+  if (newVal && logTree.value.length === 0) {
+    loadLogDates()
+  }
+})
 </script>
 
 <style scoped>
@@ -1017,6 +1393,129 @@ onUnmounted(() => {
 
 .log-debug .log-level {
   color: #808080;
+}
+
+/* 日志中心样式 */
+.logs-center {
+  display: flex;
+  gap: 16px;
+  height: 650px;
+}
+
+.logs-sidebar {
+  width: 280px;
+  border-right: 1px solid #e4e7ed;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-header {
+  padding: 12px;
+  border-bottom: 1px solid #e4e7ed;
+}
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+
+.logs-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.logs-content-panel {
+  flex: 1;
+  overflow: hidden;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background: #1e1e1e;
+}
+
+.logs-content {
+  height: 100%;
+  overflow: auto;
+  padding: 16px;
+}
+
+.log-text {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #d4d4d4;
+}
+
+.log-text pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.empty-hint {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.search-results {
+  height: 100%;
+  overflow: auto;
+  padding: 16px;
+}
+
+.search-info {
+  color: #67c23a;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+.search-result-item {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: #2d2d2d;
+  border-radius: 4px;
+  border-left: 3px solid #409eff;
+}
+
+.result-meta {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+
+.line-num {
+  color: #909399;
+  font-size: 12px;
+}
+
+.result-content {
+  color: #d4d4d4;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.result-content mark {
+  background-color: #f56c6c;
+  color: #fff;
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+
+.logs-footer {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #606266;
+  display: flex;
+  justify-content: space-between;
 }
 </style>
 
