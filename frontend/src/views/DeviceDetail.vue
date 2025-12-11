@@ -466,13 +466,16 @@
                 />
                 
                 <!-- 日志级别筛选 -->
-                <el-select v-model="logLevelFilter" placeholder="日志级别" clearable style="width: 120px">
+                <el-select v-model="logLevelFilterCenter" placeholder="日志级别" clearable style="width: 120px">
                   <el-option label="INFO" value="INFO" />
                   <el-option label="WARNING" value="WARNING" />
                   <el-option label="ERROR" value="ERROR" />
                   <el-option label="DEBUG" value="DEBUG" />
                   <el-option label="CRITICAL" value="CRITICAL" />
                 </el-select>
+                <el-tag v-if="!searchMode" size="small" type="info" style="margin-left: 8px">
+                  显示 {{ filteredCenterLogs.length }} / {{ parsedLogs.length }} 行
+                </el-tag>
                 
                 <!-- 搜索按钮 -->
                 <el-button 
@@ -540,10 +543,17 @@
               </div>
               
               <div v-else ref="logContentRef" class="logs-content">
-                <div v-if="logContent" class="log-text">
-                  <pre>{{ logContent }}</pre>
+                <div v-if="filteredCenterLogs.length > 0">
+                  <div
+                    v-for="(log, index) in filteredCenterLogs"
+                    :key="index"
+                    class="log-line"
+                    :class="getLogClass(log.level)"
+                  >
+                    <span class="log-message">{{ log.content }}</span>
+                  </div>
                 </div>
-                <el-empty v-else description="日志为空" />
+                <el-empty v-else description="日志为空或已被筛选" />
               </div>
             </div>
             
@@ -647,12 +657,43 @@ const logReturnedLines = ref(0)
 
 // 搜索相关
 const logSearchKeyword = ref('')
+const logLevelFilterCenter = ref('')  // 日志中心专用的级别筛选
 const logLines = ref(500)
 const logTail = ref(true)
 const searchMode = ref(false)
 const searchResults = ref<any>({ matches: [], total_matches: 0, returned_matches: 0 })
 
 const logContentRef = ref<HTMLElement | null>(null)
+
+// 解析日志内容，按行分割并识别日志级别
+const parsedLogs = computed(() => {
+  if (!logContent.value) return []
+  
+  const lines = logContent.value.split('\n')
+  return lines.map(line => {
+    // 识别日志级别
+    let level = 'INFO'
+    if (line.includes('[ERROR]') || line.includes('ERROR')) {
+      level = 'ERROR'
+    } else if (line.includes('[WARNING]') || line.includes('WARNING')) {
+      level = 'WARNING'
+    } else if (line.includes('[DEBUG]') || line.includes('DEBUG')) {
+      level = 'DEBUG'
+    } else if (line.includes('[CRITICAL]') || line.includes('CRITICAL')) {
+      level = 'CRITICAL'
+    }
+    
+    return { level, content: line }
+  })
+})
+
+// 筛选后的日志（应用级别筛选）
+const filteredCenterLogs = computed(() => {
+  if (!logLevelFilterCenter.value) {
+    return parsedLogs.value
+  }
+  return parsedLogs.value.filter(log => log.level === logLevelFilterCenter.value)
+})
 
 // 监听device变化，更新自动部署项目和分组
 watch(device, (newDevice) => {
@@ -1176,7 +1217,7 @@ const handleSearchLogs = async () => {
   try {
     const { task_id } = await searchLogs(device.value.device_id, {
       keyword: logSearchKeyword.value,
-      level: logLevelFilter.value,
+      level: logLevelFilterCenter.value,
       case_sensitive: false
     })
     
@@ -1395,6 +1436,12 @@ watch(showLogsCenterDialog, (newVal) => {
   color: #808080;
 }
 
+.log-critical .log-level,
+.log-critical .log-message {
+  color: #ff0000;
+  font-weight: bold;
+}
+
 /* 日志中心样式 */
 .logs-center {
   display: flex;
@@ -1435,23 +1482,14 @@ watch(showLogsCenterDialog, (newVal) => {
   background: #1e1e1e;
 }
 
-.logs-content {
+.logs-center .logs-content {
   height: 100%;
   overflow: auto;
   padding: 16px;
-}
-
-.log-text {
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
   font-size: 13px;
   line-height: 1.6;
   color: #d4d4d4;
-}
-
-.log-text pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 
 .empty-hint {
