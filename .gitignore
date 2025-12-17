@@ -55,7 +55,7 @@ device-platform.zip
 *.swp
 *.swo
 *~
-
+.qoder/
 # OS
 .DS_Store
 Thumbs.db

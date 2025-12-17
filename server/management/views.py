@@ -1809,7 +1809,10 @@ class ProjectDeploymentViewSet(viewsets.ModelViewSet):
         
         deployment.save()
         
-        return Response({"status": "updated"})
+        # 明确返回UTF-8编码的JSON响应，确保所有设备都能正确解析中文
+        response = Response({"status": "updated"})
+        response['Content-Type'] = 'application/json; charset=utf-8'
+        return response
 
 
 # ==================== 用户认证 ====================

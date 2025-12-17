@@ -161,6 +161,8 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 100,
+    # 确保JSON响应使用UTF-8编码，而不是Unicode转义
+    'UNICODE_JSON': False,
 }
 
 # CORS配置（开发环境）
@@ -172,3 +174,6 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
 ]
 CORS_ALLOW_CREDENTIALS = True
+
+# 全局默认字符编码（确保所有HTTP响应都使用UTF-8）
+DEFAULT_CHARSET = 'utf-8'
