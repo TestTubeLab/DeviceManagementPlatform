@@ -25,7 +25,7 @@ from .serializers import (
 )
 
 # Agent 最新版本号（每次更新 Agent 时需要同步修改）
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.4.0"  # 修复中文消息编码问题
 
 
 class DeviceViewSet(viewsets.ModelViewSet):

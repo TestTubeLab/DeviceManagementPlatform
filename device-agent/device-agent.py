@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.3.1"  # Agent 版本号，每次更新递增
+AGENT_VERSION = "1.4.0"  # Agent 版本号，每次更新递增（修复中文消息编码问题）
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
@@ -559,7 +559,7 @@ def execute_deployment(task):
     try:
         # 步骤1：更新状态为running
         report_deployment_progress(task_id, status="downloading", progress=10, 
-                                   message="开始拉取镜像...")
+                                   message="Pulling Docker image...")
         
         # 步骤2：拉取镜像
         full_name = image_info.get('full_name')
@@ -579,7 +579,7 @@ def execute_deployment(task):
         
         logger.info("镜像拉取完成")
         report_deployment_progress(task_id, status="configuring", progress=50,
-                                   message="镜像拉取完成，准备启动容器...")
+                                   message="Image pulled, preparing container...")
         
         # 步骤3：停止并删除旧容器（如果存在）
         logger.info(f"停止旧容器: {container_name}")
@@ -618,7 +618,7 @@ def execute_deployment(task):
         # 步骤5：启动容器
         logger.info(f"启动容器: {' '.join(cmd)}")
         report_deployment_progress(task_id, status="starting", progress=80,
-                                   message="正在启动容器...")
+                                   message="Starting container...")
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         
@@ -648,7 +648,7 @@ def execute_deployment(task):
         # 步骤9：上报成功
         logger.info(f"部署成功: {image_info.get('name')}:{version}")
         report_deployment_progress(task_id, status="completed", progress=100,
-                                   message=f"部署成功")
+                                   message="Deployment completed")
         return True
         
     except subprocess.TimeoutExpired:
@@ -673,7 +673,7 @@ def execute_restart(task_id, container_name):
     try:
         # 步骤1：更新状态
         report_deployment_progress(task_id, status="running", progress=30, 
-                                   message="正在重启容器...")
+                                   message="Restarting container...")
         
         # 步骤2：重启容器
         logger.info(f"重启容器: {container_name}")
@@ -689,7 +689,7 @@ def execute_restart(task_id, container_name):
         
         logger.info("容器重启成功")
         report_deployment_progress(task_id, status="running", progress=70,
-                                   message="等待容器就绪...")
+                                   message="Waiting for container...")
         
         # 步骤3：等待容器运行
         time.sleep(5)
@@ -707,7 +707,7 @@ def execute_restart(task_id, container_name):
         # 步骤5：上报成功
         logger.info(f"重启成功: {container_name}")
         report_deployment_progress(task_id, status="completed", progress=100,
-                                   message="重启成功")
+                                   message="Restart completed")
         return True
         
     except subprocess.TimeoutExpired:
@@ -950,7 +950,7 @@ def execute_project_restart(deployment):
     try:
         # 步骤1：更新状态
         report_project_deployment_progress(deployment_id, status="starting", progress=30, 
-                                           message="正在重启容器...")
+                                           message="Restarting container...")
         
         # 步骤2：重启容器
         logger.info(f"重启容器: {container_name}")
@@ -966,7 +966,7 @@ def execute_project_restart(deployment):
         
         logger.info("容器重启成功")
         report_project_deployment_progress(deployment_id, status="running", progress=70,
-                                           message="等待容器就绪...")
+                                           message="Waiting for container...")
         
         # 步骤3：等待容器运行
         time.sleep(5)
@@ -984,7 +984,7 @@ def execute_project_restart(deployment):
         # 步骤5：上报成功
         logger.info(f"重启成功: {container_name}")
         report_project_deployment_progress(deployment_id, status="completed", progress=100,
-                                           message="重启成功")
+                                           message="Restart completed")
         return True
         
     except subprocess.TimeoutExpired:
@@ -1029,7 +1029,7 @@ def execute_project_deployment(deployment):
     try:
         # ========== 步骤1: 检查Docker镜像 ==========
         report_project_deployment_progress(deployment_id, status="pulling_image", progress=10, 
-                                           message="正在检查Docker镜像...")
+                                           message="Checking Docker image...")
         
         docker_image = project.get('docker_image_info')
         # 支持直接指定本地镜像名称
@@ -1069,7 +1069,7 @@ def execute_project_deployment(deployment):
         
         # ========== 步骤2: 获取代码 ==========
         report_project_deployment_progress(deployment_id, status="pulling_code", progress=30,
-                                           message="正在获取项目代码...")
+                                           message="Pulling project code...")
         
         # 宿主机上的代码目录
         code_mount_path = project.get('code_mount_path', '/opt/project-code')
@@ -1117,7 +1117,7 @@ def execute_project_deployment(deployment):
         
         # ========== 步骤3: 写入配置 ==========
         report_project_deployment_progress(deployment_id, status="configuring", progress=50,
-                                           message="正在写入配置...", git_commit=git_commit)
+                                           message="Writing configuration...", git_commit=git_commit)
         
         # 配置目录（独立于代码）
         config_dir = "/opt/project-config"
@@ -1140,7 +1140,7 @@ def execute_project_deployment(deployment):
         
         # ========== 步骤4: 停止旧容器 ==========
         report_project_deployment_progress(deployment_id, status="starting", progress=70,
-                                           message="正在启动项目...")
+                                           message="Starting project...")
         
         container_name = project.get('container_name', 'app')
         start_command = project.get('start_command', '/start.sh')
@@ -1227,7 +1227,7 @@ def execute_project_deployment(deployment):
         
         # ========== 步骤6: 健康检查 ==========
         report_project_deployment_progress(deployment_id, status="running", progress=90,
-                                           message="检查容器状态...")
+                                           message="Checking container status...")
         
         time.sleep(5)
         check_result = subprocess.run(
@@ -1246,7 +1246,7 @@ def execute_project_deployment(deployment):
         # ========== 步骤7: 完成 ==========
         logger.info(f"项目部署成功: {project_name} v{project_version}")
         report_project_deployment_progress(deployment_id, status="completed", progress=100,
-                                           message="部署完成！", git_commit=git_commit)
+                                           message="Deployment completed", git_commit=git_commit)
         
         # 更新本地版本文件
         save_version(f"{project_name}-{project_version}")
