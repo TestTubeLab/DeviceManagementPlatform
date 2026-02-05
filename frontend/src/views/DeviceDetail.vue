@@ -178,6 +178,53 @@
         </el-row>
       </el-card>
 
+      <!-- 远程连接信息 -->
+      <el-card v-if="device.frp_ssh_port" shadow="hover" class="info-card" style="margin-top: 20px">
+        <template #header>
+          <div class="card-header-content">
+            <span class="card-title">远程连接 (SSH)</span>
+            <el-tag 
+              :type="device.frp_status === 'connected' ? 'success' : (device.frp_status === 'error' ? 'danger' : 'info')" 
+              size="large"
+            >
+              {{ getFrpStatusText(device.frp_status) }}
+            </el-tag>
+          </div>
+        </template>
+        <el-descriptions :column="2" border>
+          <el-descriptions-item label="SSH 端口">
+            <span style="font-family: monospace; font-weight: 600; color: #409EFF">{{ device.frp_ssh_port }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="SSH 命令">
+            <div style="display: flex; align-items: center; gap: 8px">
+              <code style="font-family: monospace; background: #f5f7fa; padding: 4px 8px; border-radius: 4px">
+                ssh -p {{ device.frp_ssh_port }} jetson@{{ frpServerAddr }}
+              </code>
+              <el-button type="primary" link size="small" @click="copySshCommand">
+                复制
+              </el-button>
+            </div>
+          </el-descriptions-item>
+        </el-descriptions>
+        <el-alert
+          v-if="device.frp_status !== 'connected'"
+          :title="device.frp_error_message || '设备 FRP 隧道尚未连接，请等待设备上线'"
+          type="warning"
+          :closable="false"
+          style="margin-top: 16px"
+        />
+      </el-card>
+      
+      <!-- 如果没有分配 FRP 端口，显示分配按钮 -->
+      <el-card v-else shadow="hover" class="info-card" style="margin-top: 20px">
+        <template #header>
+          <span class="card-title">远程连接 (SSH)</span>
+        </template>
+        <el-empty description="尚未分配 SSH 端口" :image-size="60">
+          <el-button type="primary" @click="handleAllocateFrpPort">分配 SSH 端口</el-button>
+        </el-empty>
+      </el-card>
+
       <!-- 资源使用情况 -->
       <el-row :gutter="20" style="margin-top: 20px">
         <el-col :span="8">
@@ -583,6 +630,7 @@ import {
   restartDevice, deleteDevice, updateDevice, getContainerLogs, updateAgent,
   getCurrentConfig, applyConfig, getConfigHistory, rollbackConfig,
   listLogs, readLog, searchLogs, downloadLog, getLogTaskResult,
+  allocateFrpPorts,
   type DeviceConfig, type ConfigHistory 
 } from '@/api/device'
 import { getProjects } from '@/api/project'
@@ -784,6 +832,41 @@ const getResponseTimeClass = (time: number) => {
   if (time < 100) return 'response-fast'
   if (time < 500) return 'response-normal'
   return 'response-slow'
+}
+
+// ==================== FRP 远程连接功能 ====================
+
+// FRP 服务器地址（从 settings 配置读取，这里使用默认值）
+const frpServerAddr = 'frp9.mmszxc.xin'
+
+const getFrpStatusText = (status: string) => {
+  const map: Record<string, string> = {
+    connected: '已连接',
+    disconnected: '未连接',
+    connecting: '连接中',
+    error: '连接错误'
+  }
+  return map[status] || '未知'
+}
+
+const copySshCommand = () => {
+  if (!device.value) return
+  const cmd = `ssh -p ${device.value.frp_ssh_port} jetson@${frpServerAddr}`
+  navigator.clipboard.writeText(cmd)
+  ElMessage.success('SSH 命令已复制到剪贴板')
+}
+
+const handleAllocateFrpPort = async () => {
+  if (!device.value) return
+  
+  try {
+    const result = await allocateFrpPorts(device.value.device_id)
+    ElMessage.success(`端口分配成功: ${result.ssh_port}`)
+    // 刷新设备信息
+    deviceStore.loadDevice(device.value.device_id)
+  } catch (error) {
+    ElMessage.error('端口分配失败')
+  }
 }
 
 const getLogClass = (level: string) => {

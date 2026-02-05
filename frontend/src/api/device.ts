@@ -194,3 +194,14 @@ export const getLogTaskResult = (deviceId: string, taskId: number) => {
   )
 }
 
+// ==================== FRP 远程连接 API ====================
+
+// 分配 FRP SSH 端口
+export const allocateFrpPorts = (deviceId: string) => {
+  return request.post<any, { 
+    message: string
+    ssh_port: number
+    ssh_command: string 
+  }>(`/devices/${deviceId}/allocate_frp_ports/`)
+}
+

@@ -25,7 +25,81 @@ from .serializers import (
 )
 
 # Agent 最新版本号（每次更新 Agent 时需要同步修改）
-AGENT_VERSION = "1.4.0"  # 修复中文消息编码问题
+AGENT_VERSION = "1.5.0"  # 新增 FRP 自动配置功能
+
+
+# =============================================================================
+# FRP 端口分配辅助函数
+# =============================================================================
+def get_frp_config():
+    """获取 FRP 配置（从 settings）"""
+    return getattr(settings, 'FRP_CONFIG', {})
+
+
+def allocate_frp_ssh_port(device):
+    """
+    为设备分配 SSH 端口（幂等操作）
+    - 如果已分配，直接返回
+    - 如果未分配，从端口池中分配一个可用端口
+    """
+    # 已分配则跳过
+    if device.frp_ssh_port:
+        return device.frp_ssh_port
+    
+    frp_cfg = get_frp_config()
+    if not frp_cfg.get('enabled'):
+        return None
+    
+    ssh_pool = frp_cfg.get('port_pools', {}).get('ssh', {})
+    start_port = ssh_pool.get('start', 39983)
+    end_port = ssh_pool.get('end', 39993)
+    
+    # 获取所有已分配的 SSH 端口
+    used_ports = set(
+        Device.objects.exclude(frp_ssh_port__isnull=True)
+        .values_list('frp_ssh_port', flat=True)
+    )
+    
+    # 找到第一个可用端口
+    for port in range(start_port, end_port + 1):
+        if port not in used_ports:
+            device.frp_ssh_port = port
+            device.frp_status = 'disconnected'
+            device.save(update_fields=['frp_ssh_port', 'frp_status'])
+            return port
+    
+    # 端口池耗尽
+    return None
+
+
+def build_frp_config_for_device(device):
+    """
+    构建设备的 FRP 配置（供 Agent 拉取）
+    返回 None 表示无配置
+    """
+    frp_cfg = get_frp_config()
+    if not frp_cfg.get('enabled') or not device.frp_ssh_port:
+        return None
+    
+    return {
+        'server_addr': frp_cfg.get('server_addr'),
+        'server_port': frp_cfg.get('server_port'),
+        'token': frp_cfg.get('token'),
+        'config_version': frp_cfg.get('config_version', 1),
+        'tunnels': {
+            'ssh': {
+                'type': 'tcp',
+                'local_port': 22,
+                'remote_port': device.frp_ssh_port,
+            }
+            # 预留 web 隧道配置
+            # 'web': {
+            #     'type': 'tcp',
+            #     'local_port': 8000,
+            #     'remote_port': device.frp_web_port,
+            # }
+        }
+    }
 
 
 class DeviceViewSet(viewsets.ModelViewSet):
@@ -79,6 +153,10 @@ class DeviceViewSet(viewsets.ModelViewSet):
             device.last_heartbeat = timezone.now()
             device.save()
         
+        # 🔥 FRP 自动分配端口（新设备 or 未分配端口的设备）
+        frp_port = allocate_frp_ssh_port(device)
+        frp_config = build_frp_config_for_device(device) if frp_port else None
+        
         # 🔥 自动部署逻辑：如果设备配置了自动部署项目，创建部署任务
         auto_deploy_triggered = False
         if device.auto_deploy_project:
@@ -105,7 +183,9 @@ class DeviceViewSet(viewsets.ModelViewSet):
             "status": device.status,
             "created": created,
             "auto_deploy_triggered": auto_deploy_triggered,
-            "auto_deploy_project": device.auto_deploy_project.name if device.auto_deploy_project else None
+            "auto_deploy_project": device.auto_deploy_project.name if device.auto_deploy_project else None,
+            # FRP 配置（Agent 据此配置 frpc）
+            "frp_config": frp_config,
         })
     
     @action(detail=True, methods=['post'], permission_classes=[AllowAny])
@@ -150,6 +230,13 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 device.config = {}
             device.config['agent_version'] = agent_version
         
+        # 保存 Agent 上报的 FRP 配置版本
+        agent_frp_version = request.data.get('frp_config_version')
+        if agent_frp_version is not None:
+            if not device.config:
+                device.config = {}
+            device.config['frp_config_version'] = agent_frp_version
+        
         # 更新在线状态：只要有心跳，就是在线（除非正在部署/更新）
         if device.status in ['offline', 'waiting']:
             device.status = 'online'
@@ -190,6 +277,17 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 "task_id": pending_update.id,
                 "version": pending_update.target_version,
             }
+        
+        # 🔥 FRP 配置版本检测：如果服务端配置版本更新，下发 update_frp 指令
+        frp_cfg = get_frp_config()
+        if frp_cfg.get('enabled') and device.frp_ssh_port:
+            server_frp_version = frp_cfg.get('config_version', 1)
+            agent_frp_version = device.config.get('frp_config_version', 0) if device.config else 0
+            
+            if server_frp_version > agent_frp_version:
+                # 配置版本变更，需要更新
+                response_data['frp_update_required'] = True
+                response_data['frp_config'] = build_frp_config_for_device(device)
         
         return Response(response_data)
     
@@ -868,8 +966,163 @@ class DeviceViewSet(viewsets.ModelViewSet):
             return Response({'error': 'date和files参数必填'}, status=status.HTTP_400_BAD_REQUEST)
         
         task_id = self._create_log_task(device, 'download', {'date': date, 'files': files})
-        
+
         return Response({'task_id': task_id, 'message': '日志下载任务已创建'})
+
+    # ==================== FRP 管理 API ====================
+
+    @action(detail=True, methods=['post'])
+    def allocate_frp_ports(self, request, device_id=None):
+        """
+        为设备分配 FRP 端口（手动触发）
+        POST /api/devices/{device_id}/allocate_frp_ports/
+        """
+        device = self.get_object()
+        
+        # 检查是否已分配
+        if device.frp_ssh_port:
+            frp_cfg = get_frp_config()
+            return Response({
+                'message': '设备已分配端口',
+                'ssh_port': device.frp_ssh_port,
+                'ssh_command': f"ssh -p {device.frp_ssh_port} jetson@{frp_cfg.get('server_addr')}"
+            })
+        
+        # 分配端口
+        port = allocate_frp_ssh_port(device)
+        if not port:
+            return Response({'error': '端口池已耗尽或 FRP 未启用'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        frp_cfg = get_frp_config()
+        return Response({
+            'message': '端口分配成功',
+            'ssh_port': port,
+            'ssh_command': f"ssh -p {port} jetson@{frp_cfg.get('server_addr')}"
+        })
+
+    @action(detail=True, methods=['get'], permission_classes=[AllowAny])
+    def fetch_frp_config(self, request, device_id=None):
+        """
+        Agent 获取 FRP 配置（使用 settings.FRP_CONFIG）
+        GET /api/devices/{device_id}/fetch_frp_config/
+        """
+        device = self.get_object()
+        
+        frp_config = build_frp_config_for_device(device)
+        if not frp_config:
+            return Response({'has_config': False})
+        
+        return Response({
+            'has_config': True,
+            **frp_config
+        })
+
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
+    def report_frp_status(self, request, device_id=None):
+        """
+        Agent 上报 FRP 状态
+        POST /api/devices/{device_id}/report_frp_status/
+        Body: {"status": "connected/disconnected/error", "error_message": ""}
+        """
+        device = self.get_object()
+
+        frp_status = request.data.get('status')
+        error_message = request.data.get('error_message', '')
+
+        device.frp_status = frp_status
+        device.frp_last_check = timezone.now()
+        device.frp_error_message = error_message
+        device.save()
+
+        return Response({'message': 'ok'})
+
+    @action(detail=True, methods=['get'], permission_classes=[AllowAny])
+    def pending_system_tasks(self, request, device_id=None):
+        """
+        Agent 轮询待执行的系统配置任务
+        GET /api/devices/{device_id}/pending_system_tasks/
+        """
+        device = self.get_object()
+
+        if not device.config or 'system_tasks' not in device.config:
+            return Response({'tasks': []})
+
+        pending = []
+        for task_id, task in device.config['system_tasks'].items():
+            if task['status'] == 'pending':
+                pending.append({'task_id': task_id, **task})
+                device.config['system_tasks'][task_id]['status'] = 'processing'
+
+        if pending:
+            device.save()
+
+        return Response({'tasks': pending})
+
+    @action(detail=True, methods=['post'], permission_classes=[AllowAny])
+    def report_system_task(self, request, device_id=None):
+        """
+        Agent 上报系统任务执行结果
+        POST /api/devices/{device_id}/report_system_task/
+        Body: {"task_id": "xxx", "status": "completed/failed", "error_message": ""}
+        """
+        device = self.get_object()
+
+        task_id = request.data.get('task_id')
+        task_status = request.data.get('status')
+        error_message = request.data.get('error_message', '')
+
+        if device.config and 'system_tasks' in device.config:
+            if task_id in device.config['system_tasks']:
+                device.config['system_tasks'][task_id]['status'] = task_status
+                device.config['system_tasks'][task_id]['error_message'] = error_message
+                device.save()
+
+        return Response({'message': 'ok'})
+
+    @action(detail=True, methods=['post'])
+    def setup_factory_config(self, request, device_id=None):
+        """
+        执行出厂配置
+        POST /api/devices/{device_id}/setup_factory_config/
+        """
+        device = self.get_object()
+
+        # 创建系统任务
+        if not device.config:
+            device.config = {}
+        if 'system_tasks' not in device.config:
+            device.config['system_tasks'] = {}
+
+        import time
+        task_id = str(int(time.time() * 1000))
+
+        device.config['system_tasks'][task_id] = {
+            'task_type': 'setup_factory_config',
+            'params': {},
+            'status': 'pending',
+            'created_at': timezone.now().isoformat()
+        }
+        device.save()
+
+        return Response({'message': '出厂配置任务已创建', 'task_id': task_id})
+
+    def _push_frp_config_to_device(self, device):
+        """推送 FRP 配置到设备（通过 system_tasks）"""
+        if not device.config:
+            device.config = {}
+        if 'system_tasks' not in device.config:
+            device.config['system_tasks'] = {}
+
+        import time
+        task_id = str(int(time.time() * 1000))
+
+        device.config['system_tasks'][task_id] = {
+            'task_type': 'setup_frp',
+            'params': {},
+            'status': 'pending',
+            'created_at': timezone.now().isoformat()
+        }
+        device.save()
 
 
 # ==================== Agent 版本管理 API ====================

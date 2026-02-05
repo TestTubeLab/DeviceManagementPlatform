@@ -177,3 +177,29 @@ CORS_ALLOW_CREDENTIALS = True
 
 # 全局默认字符编码（确保所有HTTP响应都使用UTF-8）
 DEFAULT_CHARSET = 'utf-8'
+
+# =============================================================================
+# FRP 内网穿透配置（支持云端热替换）
+# =============================================================================
+FRP_CONFIG = {
+    'enabled': os.getenv('FRP_ENABLED', 'True') == 'True',
+    'server_addr': os.getenv('FRP_SERVER_ADDR', 'frp9.mmszxc.xin'),
+    'server_port': int(os.getenv('FRP_SERVER_PORT', '39981')),
+    'token': os.getenv('FRP_SERVER_TOKEN', '198631'),
+    
+    # 端口池配置（按用途分组，便于未来扩展）
+    'port_pools': {
+        'ssh': {
+            'start': int(os.getenv('FRP_SSH_PORT_START', '39983')),
+            'end': int(os.getenv('FRP_SSH_PORT_END', '39993')),
+        },
+        # 预留 Web 端口池，当前不启用
+        # 'web': {
+        #     'start': int(os.getenv('FRP_WEB_PORT_START', '39994')),
+        #     'end': int(os.getenv('FRP_WEB_PORT_END', '39999')),
+        # },
+    },
+    
+    # 配置版本号（每次修改递增，Agent 据此判断是否需要更新）
+    'config_version': int(os.getenv('FRP_CONFIG_VERSION', '1')),
+}

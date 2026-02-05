@@ -155,14 +155,31 @@ class Device(models.Model):
     
     # 配置信息（JSON字段，存储设备特定配置）
     config = models.JSONField(default=dict, verbose_name='设备配置')
-    
+
+    # FRP 隧道配置
+    frp_ssh_port = models.IntegerField(null=True, blank=True, help_text="分配的SSH端口")
+    frp_web_port = models.IntegerField(null=True, blank=True, help_text="分配的Web端口")
+    frp_status = models.CharField(
+        max_length=20,
+        default='disconnected',
+        choices=[
+            ('disconnected', '未连接'),
+            ('connecting', '连接中'),
+            ('connected', '已连接'),
+            ('error', '错误')
+        ],
+        verbose_name='FRP状态'
+    )
+    frp_last_check = models.DateTimeField(null=True, blank=True, help_text="FRP状态最后检查时间")
+    frp_error_message = models.TextField(blank=True, help_text="FRP错误信息")
+
     # 分组和项目
     group = models.CharField(max_length=100, blank=True, verbose_name='设备分组')
     tags = models.JSONField(default=list, verbose_name='标签')
     auto_deploy_project = models.ForeignKey(
         'Project', on_delete=models.SET_NULL, null=True, blank=True, verbose_name='自动部署项目'
     )
-    
+
     # 时间戳
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
@@ -199,6 +216,31 @@ class Device(models.Model):
         if not self.is_online:
             return 'unknown'
         return self.service_status
+
+    @property
+    def ssh_connection_string(self):
+        """生成 SSH 连接命令"""
+        if not self.frp_ssh_port:
+            return None
+
+        frp_config = FrpServerConfig.objects.filter(is_active=True).first()
+        if not frp_config:
+            return None
+
+        # 假设默认用户名为 jetson
+        return f"ssh -p {self.frp_ssh_port} jetson@{frp_config.server_addr}"
+
+    @property
+    def web_access_url(self):
+        """生成 Web 访问地址"""
+        if not self.frp_web_port:
+            return None
+
+        frp_config = FrpServerConfig.objects.filter(is_active=True).first()
+        if not frp_config:
+            return None
+
+        return f"http://{frp_config.server_addr}:{self.frp_web_port}"
 
 
 class DeploymentTask(models.Model):
@@ -362,20 +404,20 @@ class ProjectDeployment(models.Model):
 
 class DeviceConfigHistory(models.Model):
     """设备配置历史记录"""
-    
+
     STATUS_CHOICES = [
         ('pending', '待应用'),
         ('success', '成功'),
         ('failed', '失败'),
     ]
-    
+
     device = models.ForeignKey(
-        Device, 
-        on_delete=models.CASCADE, 
+        Device,
+        on_delete=models.CASCADE,
         related_name='config_history',
         verbose_name='设备'
     )
-    
+
     # 配置数据（JSON格式）
     # 示例结构:
     # {
@@ -390,21 +432,21 @@ class DeviceConfigHistory(models.Model):
     #   "backend": {"host": "127.0.0.1", "port": 8088}
     # }
     config_data = models.JSONField(verbose_name='配置数据')
-    
+
     # 元数据
     applied_by = models.CharField(max_length=100, verbose_name='操作人')
     applied_at = models.DateTimeField(auto_now_add=True, verbose_name='应用时间')
     status = models.CharField(
-        max_length=20, 
-        choices=STATUS_CHOICES, 
+        max_length=20,
+        choices=STATUS_CHOICES,
         default='pending',
         verbose_name='状态'
     )
     error_message = models.TextField(blank=True, verbose_name='错误信息')
-    
+
     # 标记当前生效的配置
     is_active = models.BooleanField(default=False, verbose_name='当前生效')
-    
+
     class Meta:
         verbose_name = '设备配置历史'
         verbose_name_plural = '设备配置历史列表'
@@ -413,6 +455,49 @@ class DeviceConfigHistory(models.Model):
             models.Index(fields=['device', '-applied_at']),
             models.Index(fields=['device', 'is_active']),
         ]
-    
+
     def __str__(self):
         return f"{self.device.device_id} - {self.get_status_display()} ({self.applied_at})"
+
+
+class FrpServerConfig(models.Model):
+    """FRP 服务器配置（全局唯一）"""
+
+    # 服务器信息
+    server_addr = models.CharField(max_length=255, help_text="FRP服务器地址")
+    server_port = models.IntegerField(help_text="FRP服务器端口")
+    token = models.CharField(max_length=255, help_text="认证Token")
+
+    # 端口池配置
+    port_pool_start = models.IntegerField(help_text="端口池起始")
+    port_pool_end = models.IntegerField(help_text="端口池结束")
+
+    # 状态
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # 备注
+    description = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = "FRP服务器配置"
+        verbose_name_plural = "FRP服务器配置"
+
+    def __str__(self):
+        return f"{self.server_addr}:{self.server_port}"
+
+    @property
+    def available_ports(self):
+        """获取可用端口列表"""
+        all_ports = set(range(self.port_pool_start, self.port_pool_end + 1))
+        used_ports = set()
+
+        # 收集已使用的端口
+        for device in Device.objects.all():
+            if device.frp_ssh_port:
+                used_ports.add(device.frp_ssh_port)
+            if device.frp_web_port:
+                used_ports.add(device.frp_web_port)
+
+        return sorted(all_ports - used_ports)

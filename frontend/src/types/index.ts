@@ -7,6 +7,9 @@ export type ContainerStatus = 'running' | 'stopped' | 'not_found' | 'error'
 // 服务状态类型
 export type ServiceStatus = 'healthy' | 'unhealthy' | 'unknown'
 
+// FRP 状态类型
+export type FrpStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
+
 // 设备信息
 export interface Device {
   id: number
@@ -40,6 +43,12 @@ export interface Device {
   computed_status?: DeviceStatus
   computed_service_status?: ServiceStatus
   agent_version?: string
+  // FRP 远程连接相关字段
+  frp_ssh_port?: number | null
+  frp_web_port?: number | null
+  frp_status?: FrpStatus
+  frp_last_check?: string | null
+  frp_error_message?: string
 }
 
 // 部署任务状态

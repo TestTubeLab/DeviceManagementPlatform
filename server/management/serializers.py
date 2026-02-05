@@ -4,7 +4,8 @@
 from rest_framework import serializers
 from .models import (
     Device, DeploymentTask, UpdateTask, DeviceLog, DockerImage,
-    CodePackage, Project, ProjectConfig, ProjectDeployment, DeviceConfigHistory
+    CodePackage, Project, ProjectConfig, ProjectDeployment, DeviceConfigHistory,
+    FrpServerConfig
 )
 
 
@@ -14,29 +15,39 @@ class DeviceSerializer(serializers.ModelSerializer):
     computed_status = serializers.SerializerMethodField()
     computed_service_status = serializers.SerializerMethodField()
     agent_version = serializers.SerializerMethodField()
-    
+    ssh_connection_string = serializers.SerializerMethodField()
+    web_access_url = serializers.SerializerMethodField()
+
     class Meta:
         model = Device
         fields = '__all__'
         read_only_fields = ['created_at', 'updated_at', 'last_heartbeat']
-    
+
     def get_is_online(self, obj):
         """动态计算是否在线（2分钟内有心跳）"""
         return obj.is_online
-    
+
     def get_computed_status(self, obj):
         """动态计算设备状态"""
         return obj.computed_status
-    
+
     def get_computed_service_status(self, obj):
         """动态计算服务状态"""
         return obj.computed_service_status
-    
+
     def get_agent_version(self, obj):
         """获取 Agent 版本（存储在 config 字段中）"""
         if obj.config:
             return obj.config.get('agent_version', 'unknown')
         return 'unknown'
+
+    def get_ssh_connection_string(self, obj):
+        """获取 SSH 连接字符串"""
+        return obj.ssh_connection_string
+
+    def get_web_access_url(self, obj):
+        """获取 Web 访问 URL"""
+        return obj.web_access_url
 
 
 class DeploymentTaskSerializer(serializers.ModelSerializer):
@@ -246,14 +257,30 @@ class DeviceConfigHistorySerializer(serializers.ModelSerializer):
     device_name = serializers.CharField(source='device.name', read_only=True)
     device_id = serializers.CharField(source='device.device_id', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    
+
     class Meta:
         model = DeviceConfigHistory
         fields = [
-            'id', 'device', 'device_name', 'device_id', 
-            'config_data', 'applied_by', 'applied_at', 
+            'id', 'device', 'device_name', 'device_id',
+            'config_data', 'applied_by', 'applied_at',
             'status', 'status_display', 'error_message', 'is_active'
         ]
         read_only_fields = ['id', 'applied_at']
 
 
+class FrpServerConfigSerializer(serializers.ModelSerializer):
+    """FRP 服务器配置序列化器"""
+    available_ports = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FrpServerConfig
+        fields = [
+            'id', 'server_addr', 'server_port', 'token',
+            'port_pool_start', 'port_pool_end', 'is_active',
+            'description', 'created_at', 'updated_at', 'available_ports'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_available_ports(self, obj):
+        """获取可用端口列表"""
+        return obj.available_ports
