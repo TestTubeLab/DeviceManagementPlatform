@@ -133,9 +133,13 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # 额外的静态文件目录（用于 frpc 等二进制文件分发）
-STATICFILES_DIRS = [
-    BASE_DIR.parent / 'deployment' / 'deploy-simple' / 'static',
-]
+# 容器内通过 docker-compose 挂载到 /app/static
+import os
+if os.path.exists('/app/static'):
+    STATICFILES_DIRS = ['/app/static']
+else:
+    # 本地开发环境
+    STATICFILES_DIRS = [BASE_DIR.parent / 'deployment' / 'deploy-simple' / 'static']
 
 # 媒体文件配置（用于存储上传的Docker镜像）
 MEDIA_URL = '/media/'
