@@ -21,6 +21,7 @@ services:
     volumes:
       - app_data:/app/data
       - app_media:/app/media
+      - ./static:/app/static:ro  # 挂载 static 目录（只读）
       - /var/run/docker.sock:/var/run/docker.sock  # 挂载Docker socket
     restart: unless-stopped
     healthcheck:

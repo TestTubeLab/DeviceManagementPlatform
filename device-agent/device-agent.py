@@ -392,11 +392,11 @@ def render_frpc_ini(frp_config):
 
 
 def ensure_frpc_binary():
-    """确保 frpc 二进制文件存在"""
+    """确保 frpc 二进制文件存在（从云端服务器下载）"""
     if os.path.exists(FRP_BINARY_PATH):
         return True
     
-    logger.info("frpc 不存在，尝试下载...")
+    logger.info("frpc 不存在，尝试从云端下载...")
     
     # 检测架构
     import platform
@@ -409,36 +409,25 @@ def ensure_frpc_binary():
         logger.error(f"不支持的架构: {arch}")
         return False
     
-    # 下载 frpc（使用 GitHub release）
-    frp_version = "0.51.3"
-    download_url = f"https://github.com/fatedier/frp/releases/download/v{frp_version}/frp_{frp_version}_linux_{frp_arch}.tar.gz"
+    # 🔥 从云端服务器下载（不走 GitHub）
+    download_url = f"{CLOUD_SERVER.replace('/api', '')}/static/frpc-{frp_arch}"
     
     try:
-        import tempfile
-        import tarfile
+        logger.info(f"下载 frpc: {download_url}")
+        resp = requests.get(download_url, timeout=120, stream=True)
+        resp.raise_for_status()
         
-        with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as tmp:
-            tmp_path = tmp.name
-            
-            logger.info(f"下载 frpc: {download_url}")
-            resp = requests.get(download_url, timeout=120, stream=True)
-            resp.raise_for_status()
-            
+        # 确保目录存在
+        os.makedirs(os.path.dirname(FRP_BINARY_PATH), exist_ok=True)
+        
+        # 直接写入目标路径
+        with open(FRP_BINARY_PATH, 'wb') as f:
             for chunk in resp.iter_content(chunk_size=8192):
-                tmp.write(chunk)
+                f.write(chunk)
         
-        # 解压
-        with tarfile.open(tmp_path, 'r:gz') as tar:
-            for member in tar.getmembers():
-                if member.name.endswith('/frpc'):
-                    member.name = os.path.basename(member.name)
-                    tar.extract(member, '/usr/local/bin')
-                    os.chmod(FRP_BINARY_PATH, 0o755)
-                    logger.info(f"frpc 已安装到: {FRP_BINARY_PATH}")
-                    break
-        
-        os.unlink(tmp_path)
-        return os.path.exists(FRP_BINARY_PATH)
+        os.chmod(FRP_BINARY_PATH, 0o755)
+        logger.info(f"frpc 已安装到: {FRP_BINARY_PATH}")
+        return True
         
     except Exception as e:
         logger.error(f"下载 frpc 失败: {e}")
