@@ -149,7 +149,7 @@ class Device(models.Model):
     )
     service_response_time = models.IntegerField(default=0, verbose_name='服务响应时间(ms)')
     health_check_url = models.CharField(
-        max_length=200, blank=True, default='http://localhost:8000/api/', verbose_name='健康检查URL'
+        max_length=200, blank=True, default='http://localhost:8088/api/', verbose_name='健康检查URL'
     )
     last_health_check = models.DateTimeField(null=True, blank=True, verbose_name='最后健康检查时间')
     

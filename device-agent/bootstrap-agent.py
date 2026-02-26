@@ -213,7 +213,7 @@ def wait_for_health_check(timeout=60):
     
     while time.time() - start_time < timeout:
         try:
-            resp = requests.get("http://localhost:8000/api/health/", timeout=2)
+            resp = requests.get("http://localhost:8088/api/health/", timeout=2)
             if resp.status_code == 200:
                 return True
         except:

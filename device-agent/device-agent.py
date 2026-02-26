@@ -226,7 +226,7 @@ def collect_container_status(container_name="middleware"):
             "container_uptime": ""
         }
 
-def check_service_health(health_url="http://localhost:8000/api/"):
+def check_service_health(health_url="http://localhost:8088/api/"):
     """检查服务健康状态"""
     import time
     
@@ -274,7 +274,7 @@ def send_heartbeat():
     
     # 检查服务健康（只有容器运行时才检查）
     if container_info["container_status"] == "running":
-        health_info = check_service_health("http://localhost:8000/api/metrics")
+        health_info = check_service_health("http://localhost:8088/api/metrics")
     else:
         health_info = {
             "service_status": "unknown",
@@ -1601,7 +1601,7 @@ def apply_middleware_config(config_id, config_data):
         # ========== 步骤5: 验证服务 ==========
         logger.info("步骤5: 验证服务...")
         try:
-            resp = requests.get("http://localhost:8000/", timeout=10)
+            resp = requests.get("http://localhost:8088/", timeout=10)
             if resp.status_code == 200:
                 logger.info("  ✅ 服务启动成功")
             else:
