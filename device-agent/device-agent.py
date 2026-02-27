@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.5.0"  # Agent 版本号，每次更新递增（新增 FRP 自动配置功能）
+AGENT_VERSION = "1.6.0"  # Agent 版本号，每次更新递增（新增 Node.js 自动安装）
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
