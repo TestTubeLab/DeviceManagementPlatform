@@ -1359,7 +1359,22 @@ def execute_project_deployment(deployment):
                 f.write(f"{key}={value}\n")
         
         logger.info(f"配置文件已写入: {env_file} ({len(configs)}项)")
-        
+
+        # ========== 宿主机钩子 (post-deploy) ==========
+        post_deploy_script = os.path.join(code_mount_path, "MiddlewareServer", "setup-browser.sh")
+        if os.path.isfile(post_deploy_script):
+            logger.info(f"执行宿主机钩子: {post_deploy_script}")
+            hook_result = subprocess.run(
+                ["bash", post_deploy_script, os.path.join(code_mount_path, "MiddlewareServer")],
+                timeout=300, capture_output=True, text=True
+            )
+            if hook_result.returncode == 0:
+                logger.info("宿主机钩子执行成功")
+                if hook_result.stdout:
+                    logger.info(f"钩子输出: {hook_result.stdout}")
+            else:
+                logger.warning(f"宿主机钩子执行失败: {hook_result.stderr}")
+
         # ========== 步骤4: 停止旧容器 ==========
         report_project_deployment_progress(deployment_id, status="starting", progress=70,
                                            message="Starting project...")
