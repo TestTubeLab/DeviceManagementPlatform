@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.5.0"  # Agent 版本号，每次更新递增（新增 FRP 自动配置功能）
+AGENT_VERSION = "1.6.0"  # Agent 版本号，每次更新递增（新增 Node.js 自动安装）
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
@@ -1363,10 +1363,21 @@ def execute_project_deployment(deployment):
         # ========== 宿主机钩子 (post-deploy) ==========
         post_deploy_script = os.path.join(code_mount_path, "MiddlewareServer", "setup-electron.sh")
         if os.path.isfile(post_deploy_script):
+            # 检查并安装 Node.js（Electron 依赖）
+            node_check = subprocess.run(["which", "node"], capture_output=True)
+            if node_check.returncode != 0:
+                logger.info("Node.js 未安装，正在自动安装...")
+                try:
+                    subprocess.run(["apt", "update"], timeout=60, check=True)
+                    subprocess.run(["apt", "install", "-y", "nodejs", "npm"], timeout=300, check=True)
+                    logger.info("Node.js 安装成功")
+                except Exception as e:
+                    logger.warning(f"Node.js 安装失败: {e}，跳过 Electron 安装")
+
             logger.info(f"执行宿主机钩子: {post_deploy_script}")
             hook_result = subprocess.run(
                 ["bash", post_deploy_script, os.path.join(code_mount_path, "MiddlewareServer")],
-                timeout=120, capture_output=True, text=True
+                timeout=300, capture_output=True, text=True
             )
             if hook_result.returncode == 0:
                 logger.info("宿主机钩子执行成功")
