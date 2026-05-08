@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { Device } from '@/types'
+import type { Device, DeviceStatus } from '@/types'
 import { getDevices, getDevice } from '@/api/device'
+import { getDeviceDisplayStatus } from '@/utils/deviceStatus'
 
 export const useDeviceStore = defineStore('device', () => {
   const devices = ref<Device[]>([])
@@ -46,19 +47,23 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
+  const countByStatus = (status: DeviceStatus) => {
+    return devices.value.filter(device => getDeviceDisplayStatus(device) === status).length
+  }
+
   // 获取在线设备数
   const onlineCount = () => {
-    return devices.value.filter(d => d.status === 'online').length
+    return countByStatus('online')
   }
 
   // 获取离线设备数
   const offlineCount = () => {
-    return devices.value.filter(d => d.status === 'offline').length
+    return countByStatus('offline')
   }
 
   // 获取待部署设备数
   const waitingCount = () => {
-    return devices.value.filter(d => d.status === 'waiting').length
+    return countByStatus('waiting')
   }
 
   return {

@@ -6,7 +6,7 @@
         <span class="title">设备管理平台</span>
       </div>
       <div class="header-right">
-        <el-badge :value="pendingCount" class="item" :hidden="pendingCount === 0">
+        <el-badge :value="activeTaskCount" class="item" :hidden="activeTaskCount === 0">
           <el-button :icon="Bell" circle @click="showNotifications = true" />
         </el-badge>
         <el-dropdown @command="handleCommand">
@@ -68,20 +68,25 @@
     </el-container>
     
     <!-- 消息通知抽屉 -->
-    <el-drawer v-model="showNotifications" title="待处理任务" direction="rtl" size="400px">
-      <div v-if="pendingCount === 0" class="empty-notifications">
-        <el-empty description="暂无待处理任务" />
+    <el-drawer v-model="showNotifications" title="进行中任务" direction="rtl" size="400px">
+      <div v-if="activeTaskCount === 0" class="empty-notifications">
+        <el-empty description="暂无进行中任务" />
       </div>
       <div v-else class="notifications-list">
         <el-card 
-          v-for="task in pendingDeployments" 
+          v-for="task in activeDeployments" 
           :key="task.id"
           shadow="hover"
           class="notification-item"
         >
           <div class="task-info">
             <div class="task-header">
-              <el-tag type="primary">项目部署</el-tag>
+              <el-space size="small">
+                <el-tag type="primary">项目部署</el-tag>
+                <el-tag :type="getProjectDeploymentStatusType(task.status)">
+                  {{ getProjectDeploymentStatusText(task.status) }}
+                </el-tag>
+              </el-space>
               <span class="task-device">{{ task.device_info?.name || task.device_info?.device_id }}</span>
             </div>
             <div class="task-detail">
@@ -108,16 +113,22 @@ import { useRoute, useRouter } from 'vue-router'
 import { Monitor, DataLine, List, Bell, User, FolderOpened, SwitchButton } from '@element-plus/icons-vue'
 import { logout, getStoredUser, clearAuth } from '@/api/auth'
 import { getProjectDeployments, type ProjectDeployment } from '@/api/project'
+import {
+  ACTIVE_PROJECT_DEPLOYMENT_STATUS_QUERY,
+  getProjectDeploymentStatusText,
+  getProjectDeploymentStatusType,
+} from '@/utils/projectDeploymentStatus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import dayjs from 'dayjs'
 
 const route = useRoute()
 const router = useRouter()
 const showNotifications = ref(false)
-const pendingDeployments = ref<ProjectDeployment[]>([])
+const activeDeployments = ref<ProjectDeployment[]>([])
+const activeTaskTotal = ref(0)
 
 const currentRoute = computed(() => route.path)
-const pendingCount = computed(() => pendingDeployments.value.length)
+const activeTaskCount = computed(() => activeTaskTotal.value)
 
 // 获取用户名
 const username = computed(() => {
@@ -129,13 +140,14 @@ const formatTime = (time: string) => {
   return dayjs(time).format('MM-DD HH:mm')
 }
 
-// 加载待处理的部署任务
-const loadPendingDeployments = async () => {
+// 加载进行中的部署任务
+const loadActiveDeployments = async () => {
   try {
-    const res = await getProjectDeployments({ status: 'pending' })
-    pendingDeployments.value = res.results || []
+    const res = await getProjectDeployments({ status: ACTIVE_PROJECT_DEPLOYMENT_STATUS_QUERY })
+    activeDeployments.value = res.results || []
+    activeTaskTotal.value = res.count ?? (res.results || []).length
   } catch (error) {
-    console.error('加载待处理任务失败:', error)
+    console.error('加载进行中任务失败:', error)
   }
 }
 
@@ -168,9 +180,9 @@ let refreshTimer: number
 
 // 初始加载任务
 onMounted(() => {
-  loadPendingDeployments()
+  loadActiveDeployments()
   // 定期刷新任务数量（30秒）
-  refreshTimer = setInterval(loadPendingDeployments, 30000)
+  refreshTimer = setInterval(loadActiveDeployments, 30000)
 })
 
 onUnmounted(() => {

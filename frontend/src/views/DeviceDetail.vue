@@ -14,7 +14,7 @@
             <span class="card-title">基本信息</span>
             <div>
               <el-button type="primary" link :icon="Edit" @click="showEditDialog = true">编辑</el-button>
-              <StatusBadge :status="device.computed_status || device.status" style="margin-left: 12px" />
+              <StatusBadge :status="getDeviceDisplayStatus(device)" style="margin-left: 12px" />
             </div>
           </div>
         </template>
@@ -30,11 +30,11 @@
           <el-descriptions-item label="项目版本">{{ device.current_version || '-' }}</el-descriptions-item>
           <el-descriptions-item label="Agent版本">
             <span>{{ device.agent_version || 'unknown' }}</span>
-            <el-button 
-              v-if="device.is_online" 
-              type="primary" 
-              link 
-              size="small" 
+              <el-button 
+                v-if="deviceOnline" 
+                type="primary" 
+                link 
+                size="small" 
               style="margin-left: 8px"
               @click="handleUpdateAgent"
             >
@@ -42,13 +42,13 @@
             </el-button>
           </el-descriptions-item>
           <el-descriptions-item label="设备分组">{{ device.group || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="最后心跳">
-            <span v-if="device.last_heartbeat">
-              {{ formatTime(device.last_heartbeat) }}
-              <el-tag v-if="!device.is_online" type="danger" size="small" style="margin-left: 8px">
-                已离线
-              </el-tag>
-            </span>
+            <el-descriptions-item label="最后心跳">
+              <span v-if="device.last_heartbeat">
+                {{ formatTime(device.last_heartbeat) }}
+                <el-tag v-if="!deviceOnline" type="danger" size="small" style="margin-left: 8px">
+                  已离线
+                </el-tag>
+              </span>
             <span v-else style="color: #909399">从未上线</span>
           </el-descriptions-item>
           <el-descriptions-item label="创建时间">{{ formatTime(device.created_at) }}</el-descriptions-item>
@@ -120,11 +120,11 @@
           <div class="card-header-content">
             <span class="card-title">服务状态</span>
             <el-tag 
-              :type="getServiceTagType(device.computed_service_status || device.service_status)" 
+              :type="getServiceTagType(deviceServiceStatus)" 
               size="large"
               effect="dark"
             >
-              {{ getServiceStatusText(device.computed_service_status || device.service_status) }}
+              {{ getServiceStatusText(deviceServiceStatus) }}
             </el-tag>
           </div>
         </template>
@@ -133,8 +133,8 @@
             <div class="status-item">
               <div class="status-label">容器状态</div>
               <div class="status-value">
-                <el-tag :type="getContainerTagType(device.container_status)" size="small">
-                  {{ getContainerStatusText(device.container_status) }}
+                <el-tag :type="getContainerTagType(deviceContainerStatus)" size="small">
+                  {{ getContainerStatusText(deviceContainerStatus) }}
                 </el-tag>
               </div>
             </div>
@@ -148,7 +148,7 @@
           <el-col :span="8">
             <div class="status-item">
               <div class="status-label">运行时长</div>
-              <div class="status-value">{{ device.container_uptime || '-' }}</div>
+              <div class="status-value">{{ deviceOnline ? (device.container_uptime || '-') : '-' }}</div>
             </div>
           </el-col>
         </el-row>
@@ -157,9 +157,10 @@
             <div class="status-item">
               <div class="status-label">响应时间</div>
               <div class="status-value">
-                <span :class="getResponseTimeClass(device.service_response_time)">
+                <span v-if="deviceOnline" :class="getResponseTimeClass(device.service_response_time)">
                   {{ device.service_response_time }}ms
                 </span>
+                <span v-else class="response-unknown">-</span>
               </div>
             </div>
           </el-col>
@@ -184,10 +185,10 @@
           <div class="card-header-content">
             <span class="card-title">远程连接 (SSH)</span>
             <el-tag 
-              :type="device.frp_status === 'connected' ? 'success' : (device.frp_status === 'error' ? 'danger' : 'info')" 
+              :type="getFrpTagType(deviceFrpStatus)" 
               size="large"
             >
-              {{ getFrpStatusText(device.frp_status) }}
+              {{ getFrpStatusText(deviceFrpStatus) }}
             </el-tag>
           </div>
         </template>
@@ -198,7 +199,7 @@
           <el-descriptions-item label="SSH 命令">
             <div style="display: flex; align-items: center; gap: 8px">
               <code style="font-family: monospace; background: #f5f7fa; padding: 4px 8px; border-radius: 4px">
-                ssh -p {{ device.frp_ssh_port }} jetson@{{ frpServerAddr }}
+                {{ sshCommand }}
               </code>
               <el-button type="primary" link size="small" @click="copySshCommand">
                 复制
@@ -207,8 +208,8 @@
           </el-descriptions-item>
         </el-descriptions>
         <el-alert
-          v-if="device.frp_status !== 'connected'"
-          :title="device.frp_error_message || '设备 FRP 隧道尚未连接，请等待设备上线'"
+          v-if="deviceFrpStatus !== 'connected'"
+          :title="deviceFrpAlertText"
           type="warning"
           :closable="false"
           style="margin-top: 16px"
@@ -233,10 +234,12 @@
               <span class="card-title">CPU使用率</span>
             </template>
             <el-progress 
+              v-if="deviceOnline"
               type="dashboard" 
               :percentage="device.cpu_usage" 
               :color="getProgressColor(device.cpu_usage)"
             />
+            <div v-else class="metric-unavailable">离线，暂无实时数据</div>
           </el-card>
         </el-col>
         <el-col :span="8">
@@ -245,10 +248,12 @@
               <span class="card-title">内存使用率</span>
             </template>
             <el-progress 
+              v-if="deviceOnline"
               type="dashboard" 
               :percentage="device.memory_usage"
               :color="getProgressColor(device.memory_usage)"
             />
+            <div v-else class="metric-unavailable">离线，暂无实时数据</div>
           </el-card>
         </el-col>
         <el-col :span="8">
@@ -257,10 +262,12 @@
               <span class="card-title">磁盘使用率</span>
             </template>
             <el-progress 
+              v-if="deviceOnline"
               type="dashboard" 
               :percentage="device.disk_usage"
               :color="getProgressColor(device.disk_usage)"
             />
+            <div v-else class="metric-unavailable">离线，暂无实时数据</div>
           </el-card>
         </el-col>
       </el-row>
@@ -635,6 +642,15 @@ import {
 } from '@/api/device'
 import { getProjects } from '@/api/project'
 import StatusBadge from '@/components/StatusBadge.vue'
+import {
+  type DisplayContainerStatus,
+  type DisplayFrpStatus,
+  getDeviceDisplayContainerStatus,
+  getDeviceDisplayFrpStatus,
+  getDeviceDisplayServiceStatus,
+  getDeviceDisplayStatus,
+  isDeviceCurrentlyOnline,
+} from '@/utils/deviceStatus'
 import dayjs from 'dayjs'
 
 const route = useRoute()
@@ -642,6 +658,21 @@ const router = useRouter()
 const deviceStore = useDeviceStore()
 
 const device = computed(() => deviceStore.currentDevice)
+const deviceOnline = computed(() => device.value ? isDeviceCurrentlyOnline(device.value) : false)
+const deviceServiceStatus = computed(() => device.value ? getDeviceDisplayServiceStatus(device.value) : 'unknown')
+const deviceContainerStatus = computed<DisplayContainerStatus>(() => (
+  device.value ? getDeviceDisplayContainerStatus(device.value) : 'unknown'
+))
+const deviceFrpStatus = computed<DisplayFrpStatus>(() => (
+  device.value ? getDeviceDisplayFrpStatus(device.value) : 'offline'
+))
+const deviceFrpAlertText = computed(() => {
+  if (!device.value || !deviceOnline.value) {
+    return '设备当前离线，FRP 状态不是实时值'
+  }
+  return device.value.frp_error_message || '设备 FRP 隧道尚未连接，请等待设备上线'
+})
+
 const projects = ref<any[]>([])
 const autoDeployProject = ref<number | null>(null)
 const deviceGroup = ref('')
@@ -807,22 +838,24 @@ const getServiceStatusText = (status: string) => {
   return map[status] || '未知'
 }
 
-const getContainerTagType = (status: string) => {
+const getContainerTagType = (status: DisplayContainerStatus) => {
   const map: Record<string, string> = {
     running: 'success',
     stopped: 'danger',
     not_found: 'warning',
-    error: 'danger'
+    error: 'danger',
+    unknown: 'info',
   }
   return map[status] || 'info'
 }
 
-const getContainerStatusText = (status: string) => {
+const getContainerStatusText = (status: DisplayContainerStatus) => {
   const map: Record<string, string> = {
     running: '运行中',
     stopped: '已停止',
     not_found: '未找到',
-    error: '异常'
+    error: '异常',
+    unknown: '状态未知',
   }
   return map[status] || '未知'
 }
@@ -836,22 +869,42 @@ const getResponseTimeClass = (time: number) => {
 
 // ==================== FRP 远程连接功能 ====================
 
-// FRP 服务器地址（从 settings 配置读取，这里使用默认值）
-const frpServerAddr = 'frp9.mmszxc.xin'
+const sshCommand = computed(() => {
+  if (!device.value) return ''
+  if (device.value.ssh_connection_string) {
+    return device.value.ssh_connection_string
+  }
+  if (!device.value.frp_ssh_port) {
+    return ''
+  }
+  return `ssh -p ${device.value.frp_ssh_port} jetson@${device.value.ip_address || '127.0.0.1'}`
+})
 
-const getFrpStatusText = (status: string) => {
+const getFrpTagType = (status: DisplayFrpStatus) => {
+  const map: Record<string, string> = {
+    connected: 'success',
+    disconnected: 'warning',
+    connecting: 'warning',
+    error: 'danger',
+    offline: 'info',
+  }
+  return map[status] || 'info'
+}
+
+const getFrpStatusText = (status: DisplayFrpStatus) => {
   const map: Record<string, string> = {
     connected: '已连接',
     disconnected: '未连接',
     connecting: '连接中',
-    error: '连接错误'
+    error: '连接错误',
+    offline: '设备离线',
   }
   return map[status] || '未知'
 }
 
 const copySshCommand = () => {
-  if (!device.value) return
-  const cmd = `ssh -p ${device.value.frp_ssh_port} jetson@${frpServerAddr}`
+  const cmd = sshCommand.value
+  if (!cmd) return
   navigator.clipboard.writeText(cmd)
   ElMessage.success('SSH 命令已复制到剪贴板')
 }
@@ -1454,6 +1507,15 @@ watch(showLogsCenterDialog, (newVal) => {
 
 .response-unknown {
   color: #909399;
+}
+
+.metric-unavailable {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  color: #909399;
+  font-size: 14px;
 }
 
 /* 日志样式 */

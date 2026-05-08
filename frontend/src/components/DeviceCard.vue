@@ -10,7 +10,7 @@
           <div class="device-id">{{ device.device_id }}</div>
         </div>
       </div>
-      <StatusBadge :status="device.computed_status || device.status" />
+      <StatusBadge :status="deviceStatus" />
     </div>
     
     <el-divider style="margin: 12px 0" />
@@ -46,18 +46,27 @@
     <div class="card-footer">
       <div class="resource-item">
         <span class="resource-label">CPU</span>
-        <el-progress :percentage="device.cpu_usage" :stroke-width="6" :show-text="false" />
-        <span class="resource-value">{{ device.cpu_usage.toFixed(1) }}%</span>
+        <template v-if="isOnline">
+          <el-progress :percentage="device.cpu_usage" :stroke-width="6" :show-text="false" />
+          <span class="resource-value">{{ device.cpu_usage.toFixed(1) }}%</span>
+        </template>
+        <span v-else class="resource-offline">离线</span>
       </div>
       <div class="resource-item">
         <span class="resource-label">内存</span>
-        <el-progress :percentage="device.memory_usage" :stroke-width="6" :show-text="false" />
-        <span class="resource-value">{{ device.memory_usage.toFixed(1) }}%</span>
+        <template v-if="isOnline">
+          <el-progress :percentage="device.memory_usage" :stroke-width="6" :show-text="false" />
+          <span class="resource-value">{{ device.memory_usage.toFixed(1) }}%</span>
+        </template>
+        <span v-else class="resource-offline">离线</span>
       </div>
       <div class="resource-item">
         <span class="resource-label">磁盘</span>
-        <el-progress :percentage="device.disk_usage" :stroke-width="6" :show-text="false" />
-        <span class="resource-value">{{ device.disk_usage.toFixed(1) }}%</span>
+        <template v-if="isOnline">
+          <el-progress :percentage="device.disk_usage" :stroke-width="6" :show-text="false" />
+          <span class="resource-value">{{ device.disk_usage.toFixed(1) }}%</span>
+        </template>
+        <span v-else class="resource-offline">离线</span>
       </div>
     </div>
   </el-card>
@@ -68,6 +77,11 @@ import { computed } from 'vue'
 import { Monitor } from '@element-plus/icons-vue'
 import type { Device } from '@/types'
 import StatusBadge from './StatusBadge.vue'
+import {
+  getDeviceDisplayServiceStatus,
+  getDeviceDisplayStatus,
+  isDeviceCurrentlyOnline,
+} from '@/utils/deviceStatus'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import 'dayjs/locale/zh-cn'
@@ -83,9 +97,12 @@ defineEmits<{
   click: []
 }>()
 
+const deviceStatus = computed(() => getDeviceDisplayStatus(props.device))
+const isOnline = computed(() => isDeviceCurrentlyOnline(props.device))
+const serviceStatus = computed(() => getDeviceDisplayServiceStatus(props.device))
+
 const statusClass = computed(() => {
-  const status = props.device.computed_status || props.device.status
-  return `status-${status}`
+  return `status-${deviceStatus.value}`
 })
 
 const heartbeatText = computed(() => {
@@ -94,8 +111,7 @@ const heartbeatText = computed(() => {
 })
 
 const serviceStatusClass = computed(() => {
-  const status = props.device.computed_service_status || props.device.service_status || 'unknown'
-  return `service-${status}`
+  return `service-${serviceStatus.value}`
 })
 
 const serviceStatusText = computed(() => {
@@ -104,8 +120,7 @@ const serviceStatusText = computed(() => {
     unhealthy: '异常',
     unknown: '未知'
   }
-  const status = props.device.computed_service_status || props.device.service_status
-  return map[status] || '未知'
+  return map[serviceStatus.value] || '未知'
 })
 </script>
 
@@ -211,6 +226,12 @@ const serviceStatusText = computed(() => {
   font-size: 12px;
   color: #606266;
   text-align: right;
+}
+
+.resource-offline {
+  font-size: 12px;
+  color: #909399;
+  line-height: 24px;
 }
 
 /* 服务状态指示器 */

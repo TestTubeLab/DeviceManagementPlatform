@@ -2031,7 +2031,11 @@ class ProjectDeploymentViewSet(viewsets.ModelViewSet):
         if project_id:
             queryset = queryset.filter(project_id=project_id)
         if status:
-            queryset = queryset.filter(status=status)
+            status_values = [value.strip() for value in status.split(',') if value.strip()]
+            if len(status_values) > 1:
+                queryset = queryset.filter(status__in=status_values)
+            elif status_values:
+                queryset = queryset.filter(status=status_values[0])
         
         return queryset
     

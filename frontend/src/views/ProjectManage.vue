@@ -225,7 +225,7 @@
               >
                 <span>{{ device.name || device.device_id }}</span>
                 <span style="float: right; color: #8492a6; font-size: 13px">
-                  {{ device.status === 'online' ? '🟢 在线' : '🔴 离线' }}
+                  {{ isDeviceCurrentlyOnline(device) ? '🟢 在线' : '🔴 离线' }}
                 </span>
               </el-option>
             </el-select>
@@ -444,11 +444,13 @@ import {
 } from '@/api/project'
 import { getDevices } from '@/api/device'
 import { getCodePackages, uploadCodePackage, type CodePackage } from '@/api/codePackage'
+import type { Device } from '@/types'
+import { isDeviceCurrentlyOnline } from '@/utils/deviceStatus'
 import dayjs from 'dayjs'
 
 const loading = ref(false)
 const projects = ref<Project[]>([])
-const devices = ref<any[]>([])
+const devices = ref<Device[]>([])
 const codePackages = ref<CodePackage[]>([])
 
 const showCreateDialog = ref(false)

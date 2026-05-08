@@ -116,6 +116,11 @@
 import { ref, onMounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { getProjectDeployments, type ProjectDeployment } from '@/api/project'
+import {
+  getProjectDeploymentProgressStatus,
+  getProjectDeploymentStatusText,
+  getProjectDeploymentStatusType,
+} from '@/utils/projectDeploymentStatus'
 import dayjs from 'dayjs'
 
 const loading = ref(false)
@@ -136,37 +141,15 @@ const loadDeployments = async () => {
 }
 
 const getStatusType = (status: string) => {
-  const typeMap: Record<string, any> = {
-    pending: 'info',
-    pulling_image: 'warning',
-    pulling_code: 'warning',
-    configuring: 'warning',
-    starting: 'warning',
-    running: 'success',
-    completed: 'success',
-    failed: 'danger',
-  }
-  return typeMap[status] || 'info'
+  return getProjectDeploymentStatusType(status)
 }
 
 const getStatusText = (status: string) => {
-  const textMap: Record<string, string> = {
-    pending: '等待中',
-    pulling_image: '拉取镜像',
-    pulling_code: '下载代码',
-    configuring: '配置中',
-    starting: '启动中',
-    running: '运行中',
-    completed: '已完成',
-    failed: '失败',
-  }
-  return textMap[status] || status
+  return getProjectDeploymentStatusText(status)
 }
 
 const getProgressStatus = (status: string) => {
-  if (status === 'completed' || status === 'running') return 'success'
-  if (status === 'failed') return 'exception'
-  return undefined
+  return getProjectDeploymentProgressStatus(status)
 }
 
 const formatTime = (time: string) => {

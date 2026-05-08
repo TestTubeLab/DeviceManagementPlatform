@@ -84,6 +84,7 @@ import { useDeviceStore } from '@/stores/device'
 import { createDevice } from '@/api/device'
 import DeviceCard from '@/components/DeviceCard.vue'
 import type { Device } from '@/types'
+import { getDeviceDisplayStatus } from '@/utils/deviceStatus'
 
 const router = useRouter()
 const deviceStore = useDeviceStore()
@@ -104,7 +105,7 @@ const filteredDevices = computed(() => {
   let devices = deviceStore.devices
 
   if (filterStatus.value) {
-    devices = devices.filter(d => d.status === filterStatus.value)
+    devices = devices.filter(d => getDeviceDisplayStatus(d) === filterStatus.value)
   }
 
   if (searchText.value) {

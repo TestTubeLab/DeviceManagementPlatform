@@ -2,25 +2,60 @@
 Django Admin配置
 """
 from django.contrib import admin
+from django.utils import timezone
+from datetime import timedelta
 from .models import (
     Device, DeploymentTask, UpdateTask, DeviceLog, DockerImage,
     CodePackage, Project, ProjectConfig, ProjectDeployment
 )
 
 
+class DeviceActualStatusFilter(admin.SimpleListFilter):
+    title = '实时状态'
+    parameter_name = 'actual_status'
+
+    def lookups(self, request, model_admin):
+        return (
+            ('online', '在线'),
+            ('offline', '离线'),
+            ('waiting', '等待部署'),
+            ('deploying', '部署中'),
+            ('updating', '更新中'),
+            ('error', '异常'),
+        )
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if not value:
+            return queryset
+
+        heartbeat_threshold = timezone.now() - timedelta(seconds=120)
+        online_queryset = queryset.filter(last_heartbeat__gte=heartbeat_threshold)
+        offline_queryset = queryset.exclude(last_heartbeat__gte=heartbeat_threshold)
+
+        if value == 'offline':
+            return offline_queryset
+        if value == 'online':
+            return online_queryset.filter(status__in=['online', 'offline'])
+        if value in ['waiting', 'deploying', 'updating', 'error']:
+            return online_queryset.filter(status=value)
+
+        return queryset
+
+
 @admin.register(Device)
 class DeviceAdmin(admin.ModelAdmin):
-    list_display = ['device_id', 'name', 'status', 'current_version', 'is_online', 'last_heartbeat']
-    list_filter = ['status', 'created_at']
+    list_display = ['device_id', 'name', 'display_status', 'current_version', 'is_online', 'last_heartbeat']
+    list_filter = [DeviceActualStatusFilter, 'created_at']
     search_fields = ['device_id', 'name', 'mac_address', 'ip_address']
-    readonly_fields = ['created_at', 'updated_at']
+    readonly_fields = ['created_at', 'updated_at', 'computed_status', 'is_online']
     
     fieldsets = [
         ('基本信息', {
             'fields': ['device_id', 'name', 'location', 'mac_address', 'ip_address']
         }),
         ('状态信息', {
-            'fields': ['status', 'current_version', 'last_heartbeat']
+            'fields': ['status', 'computed_status', 'is_online', 'current_version', 'last_heartbeat']
         }),
         ('分组和项目', {
             'fields': ['group', 'tags', 'auto_deploy_project']
@@ -37,6 +72,11 @@ class DeviceAdmin(admin.ModelAdmin):
             'classes': ['collapse']
         }),
     ]
+
+    @admin.display(description='实时状态')
+    def display_status(self, obj):
+        status_text = dict(Device.STATUS_CHOICES).get(obj.computed_status, obj.computed_status)
+        return status_text
 
 
 @admin.register(DeploymentTask)

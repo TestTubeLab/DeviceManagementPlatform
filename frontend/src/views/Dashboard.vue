@@ -71,7 +71,7 @@
             <el-table-column prop="ip_address" label="IP地址" width="140" />
             <el-table-column label="状态">
               <template #default="{ row }">
-                <StatusBadge :status="row.status" />
+                <StatusBadge :status="getDeviceDisplayStatus(row)" />
               </template>
             </el-table-column>
             <el-table-column label="最后心跳">
@@ -138,6 +138,13 @@ import { Check, Close, Clock, List } from '@element-plus/icons-vue'
 import { useDeviceStore } from '@/stores/device'
 import { getProjectDeployments, type ProjectDeployment } from '@/api/project'
 import StatusBadge from '@/components/StatusBadge.vue'
+import { getDeviceDisplayStatus, isDeviceCurrentlyOnline } from '@/utils/deviceStatus'
+import {
+  ACTIVE_PROJECT_DEPLOYMENT_STATUS_QUERY,
+  getProjectDeploymentProgressStatus,
+  getProjectDeploymentStatusText,
+  getProjectDeploymentStatusType,
+} from '@/utils/projectDeploymentStatus'
 import * as echarts from 'echarts'
 import dayjs from 'dayjs'
 
@@ -145,49 +152,34 @@ const deviceStore = useDeviceStore()
 
 const statusChart = ref<HTMLElement>()
 const recentDeployments = ref<ProjectDeployment[]>([])
+const activeDeploymentCount = ref(0)
+
+const getHeartbeatValue = (time: string | null) => {
+  if (!time) return 0
+  return dayjs(time).valueOf()
+}
 
 const recentDevices = computed(() => {
-  return deviceStore.devices.slice(0, 5)
+  return [...deviceStore.devices]
+    .filter(device => isDeviceCurrentlyOnline(device))
+    .sort((a, b) => getHeartbeatValue(b.last_heartbeat) - getHeartbeatValue(a.last_heartbeat))
+    .slice(0, 5)
 })
 
 const pendingTaskCount = computed(() => {
-  return recentDeployments.value.filter(d => 
-    ['pending', 'pulling_image', 'pulling_code', 'configuring', 'starting'].includes(d.status)
-  ).length
+  return activeDeploymentCount.value
 })
 
 const getStatusType = (status: string) => {
-  const typeMap: Record<string, any> = {
-    pending: 'info',
-    pulling_image: 'warning',
-    pulling_code: 'warning',
-    configuring: 'warning',
-    starting: 'warning',
-    running: 'success',
-    completed: 'success',
-    failed: 'danger',
-  }
-  return typeMap[status] || 'info'
+  return getProjectDeploymentStatusType(status)
 }
 
 const getStatusText = (status: string) => {
-  const textMap: Record<string, string> = {
-    pending: '等待中',
-    pulling_image: '拉取镜像',
-    pulling_code: '下载代码',
-    configuring: '配置中',
-    starting: '启动中',
-    running: '运行中',
-    completed: '已完成',
-    failed: '失败',
-  }
-  return textMap[status] || status
+  return getProjectDeploymentStatusText(status)
 }
 
 const getProgressStatus = (status: string) => {
-  if (status === 'completed' || status === 'running') return 'success'
-  if (status === 'failed') return 'exception'
-  return undefined
+  return getProjectDeploymentProgressStatus(status)
 }
 
 const formatTime = (time: string | null) => {
@@ -198,13 +190,14 @@ const formatTime = (time: string | null) => {
 const initStatusChart = () => {
   if (!statusChart.value) return
   
-  const chart = echarts.init(statusChart.value)
+  const chart = echarts.getInstanceByDom(statusChart.value) || echarts.init(statusChart.value)
   
   const statusLabels: Record<string, string> = {
     online: '在线',
     offline: '离线',
     waiting: '待部署',
     deploying: '部署中',
+    updating: '更新中',
     error: '异常'
   }
   
@@ -213,12 +206,14 @@ const initStatusChart = () => {
     offline: '#909399',
     waiting: '#409eff',
     deploying: '#e6a23c',
+    updating: '#36cfc9',
     error: '#f56c6c'
   }
   
   const statusCount: Record<string, number> = {}
   deviceStore.devices.forEach(device => {
-    statusCount[device.status] = (statusCount[device.status] || 0) + 1
+    const status = getDeviceDisplayStatus(device)
+    statusCount[status] = (statusCount[status] || 0) + 1
   })
   
   const option = {
@@ -257,8 +252,12 @@ const initStatusChart = () => {
 
 const loadDeployments = async () => {
   try {
-    const res = await getProjectDeployments()
-    recentDeployments.value = (res.results || []).slice(0, 10)
+    const [recentRes, activeRes] = await Promise.all([
+      getProjectDeployments(),
+      getProjectDeployments({ status: ACTIVE_PROJECT_DEPLOYMENT_STATUS_QUERY }),
+    ])
+    recentDeployments.value = (recentRes.results || []).slice(0, 10)
+    activeDeploymentCount.value = activeRes.count ?? (activeRes.results || []).length
   } catch (error) {
     console.error('加载部署任务失败:', error)
   }

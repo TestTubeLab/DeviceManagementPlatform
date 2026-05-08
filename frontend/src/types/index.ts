@@ -49,6 +49,7 @@ export interface Device {
   frp_status?: FrpStatus
   frp_last_check?: string | null
   frp_error_message?: string
+  ssh_connection_string?: string | null
 }
 
 // 部署任务状态
