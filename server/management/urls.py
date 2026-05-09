@@ -14,6 +14,7 @@ router.register(r'images', views.DockerImageViewSet)
 router.register(r'code-packages', views.CodePackageViewSet)
 router.register(r'projects', views.ProjectViewSet)
 router.register(r'project-deployments', views.ProjectDeploymentViewSet)
+router.register(r'frp', views.FrpManagementViewSet, basename='frp')
 
 urlpatterns = [
     path('', include(router.urls)),

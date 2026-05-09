@@ -6,7 +6,7 @@ from django.utils import timezone
 from datetime import timedelta
 from .models import (
     Device, DeploymentTask, UpdateTask, DeviceLog, DockerImage,
-    CodePackage, Project, ProjectConfig, ProjectDeployment
+    CodePackage, Project, ProjectConfig, ProjectDeployment, FrpServerConfig
 )
 
 
@@ -59,6 +59,9 @@ class DeviceAdmin(admin.ModelAdmin):
         }),
         ('分组和项目', {
             'fields': ['group', 'tags', 'auto_deploy_project']
+        }),
+        ('FRP', {
+            'fields': ['frp_enabled', 'frp_ssh_port', 'frp_status', 'frp_last_check', 'frp_error_message']
         }),
         ('硬件指标', {
             'fields': ['cpu_usage', 'memory_usage', 'disk_usage']
@@ -183,3 +186,11 @@ class ProjectDeploymentAdmin(admin.ModelAdmin):
             'classes': ['collapse']
         }),
     ]
+
+
+@admin.register(FrpServerConfig)
+class FrpServerConfigAdmin(admin.ModelAdmin):
+    list_display = ['server_addr', 'server_port', 'port_pool_start', 'port_pool_end', 'is_active', 'config_version', 'updated_at']
+    list_filter = ['is_active', 'updated_at']
+    search_fields = ['server_addr', 'description']
+    readonly_fields = ['config_version', 'created_at', 'updated_at']

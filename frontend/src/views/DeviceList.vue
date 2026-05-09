@@ -9,9 +9,16 @@
 
     <!-- 筛选和搜索 -->
     <el-card shadow="never" class="filter-card">
-      <el-form :inline="true">
+      <el-form :inline="true" class="filter-form">
         <el-form-item label="状态筛选">
-          <el-select v-model="filterStatus" placeholder="全部状态" clearable @change="filterDevices">
+          <el-select
+            v-model="filterStatus"
+            class="status-select"
+            popper-class="status-select-dropdown"
+            placeholder="全部状态"
+            clearable
+            @change="filterDevices"
+          >
             <el-option label="在线" value="online" />
             <el-option label="离线" value="offline" />
             <el-option label="等待部署" value="waiting" />
@@ -185,11 +192,46 @@ onMounted(() => {
   margin-bottom: 20px;
 }
 
+.filter-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 16px;
+}
+
+.filter-form :deep(.el-form-item) {
+  align-items: center;
+  margin: 0;
+}
+
+.filter-form :deep(.el-form-item__label) {
+  height: 36px;
+  line-height: 36px;
+}
+
+.filter-form :deep(.el-form-item__content) {
+  align-items: center;
+  min-height: 36px;
+}
+
+.status-select {
+  width: 150px;
+}
+
+.status-select :deep(.el-select__wrapper) {
+  min-height: 36px;
+}
+
+:global(.status-select-dropdown) {
+  min-width: 150px !important;
+}
+
 .device-grid {
   margin-top: 20px;
 }
 
 .device-grid .el-col {
+  display: flex;
   margin-bottom: 20px;
 }
 </style>

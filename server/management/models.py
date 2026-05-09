@@ -157,6 +157,7 @@ class Device(models.Model):
     config = models.JSONField(default=dict, verbose_name='设备配置')
 
     # FRP 隧道配置
+    frp_enabled = models.BooleanField(default=True, verbose_name='启用FRP')
     frp_ssh_port = models.IntegerField(null=True, blank=True, help_text="分配的SSH端口")
     frp_web_port = models.IntegerField(null=True, blank=True, help_text="分配的Web端口")
     frp_status = models.CharField(
@@ -220,7 +221,7 @@ class Device(models.Model):
     @property
     def ssh_connection_string(self):
         """生成 SSH 连接命令"""
-        if not self.frp_ssh_port:
+        if not self.frp_enabled or not self.frp_ssh_port:
             return None
 
         frp_config = FrpServerConfig.objects.filter(is_active=True).first()
@@ -233,7 +234,7 @@ class Device(models.Model):
     @property
     def web_access_url(self):
         """生成 Web 访问地址"""
-        if not self.frp_web_port:
+        if not self.frp_enabled or not self.frp_web_port:
             return None
 
         frp_config = FrpServerConfig.objects.filter(is_active=True).first()
@@ -474,6 +475,7 @@ class FrpServerConfig(models.Model):
 
     # 状态
     is_active = models.BooleanField(default=True)
+    config_version = models.IntegerField(default=1, help_text="配置版本号")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -494,10 +496,15 @@ class FrpServerConfig(models.Model):
         used_ports = set()
 
         # 收集已使用的端口
-        for device in Device.objects.all():
+        for device in Device.objects.filter(frp_enabled=True):
             if device.frp_ssh_port:
                 used_ports.add(device.frp_ssh_port)
             if device.frp_web_port:
                 used_ports.add(device.frp_web_port)
 
         return sorted(all_ports - used_ports)
+
+    @property
+    def total_ports(self):
+        """端口池总容量"""
+        return max(self.port_pool_end - self.port_pool_start + 1, 0)

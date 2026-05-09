@@ -1,104 +1,380 @@
 """
 设备管理API视图
 """
+import configparser
 import os
 import subprocess
 import json
+from io import StringIO
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from django.http import HttpResponse
 from django.contrib.auth import authenticate
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.authtoken.models import Token
 from .models import (
     Device, DeploymentTask, UpdateTask, DeviceLog, DockerImage,
-    CodePackage, Project, ProjectConfig, ProjectDeployment
+    CodePackage, Project, ProjectConfig, ProjectDeployment, FrpServerConfig
 )
 from .serializers import (
     DeviceSerializer, DeploymentTaskSerializer,
     UpdateTaskSerializer, DeviceLogSerializer, DockerImageSerializer,
-    CodePackageSerializer, ProjectSerializer, ProjectConfigSerializer, ProjectDeploymentSerializer
+    CodePackageSerializer, ProjectSerializer, ProjectConfigSerializer,
+    ProjectDeploymentSerializer, FrpServerConfigSerializer, FrpDeviceSerializer
 )
 
 # Agent 最新版本号（每次更新 Agent 时需要同步修改）
-AGENT_VERSION = "1.6.0"  # 新增 FRP 自动配置功能
+AGENT_VERSION = "1.7.0"  # 新增 FRP 服务集中管理和停用能力
 
 
 # =============================================================================
-# FRP 端口分配辅助函数
+# FRP 管理辅助函数
 # =============================================================================
+def get_default_frp_config():
+    """从 settings 读取默认 FRP 配置，用于首次引导数据库记录。"""
+    frp_cfg = getattr(settings, 'FRP_CONFIG', {})
+    ssh_pool = frp_cfg.get('port_pools', {}).get('ssh', {})
+    return {
+        'server_addr': frp_cfg.get('server_addr', '127.0.0.1'),
+        'server_port': frp_cfg.get('server_port', 7000),
+        'token': frp_cfg.get('token', ''),
+        'port_pool_start': ssh_pool.get('start', 6000),
+        'port_pool_end': ssh_pool.get('end', 6999),
+        'is_active': frp_cfg.get('enabled', True),
+        'config_version': frp_cfg.get('config_version', 1),
+        'description': '从 settings.FRP_CONFIG 自动初始化',
+    }
+
+
 def get_frp_config():
-    """获取 FRP 配置（从 settings）"""
-    return getattr(settings, 'FRP_CONFIG', {})
+    """获取 FRP 配置（数据库为准，缺失时自动初始化）。"""
+    config = FrpServerConfig.objects.order_by('-is_active', 'id').first()
+    if config:
+        return config
+
+    return FrpServerConfig.objects.create(**get_default_frp_config())
 
 
-def allocate_frp_ssh_port(device):
+def get_frp_runtime_settings():
+    """FRP 服务运行时信息（容器名、宿主机配置目录）。"""
+    return {
+        'container_name': getattr(settings, 'FRP_SERVICE_CONTAINER', 'frps-service'),
+        'config_dir': getattr(settings, 'FRP_HOST_CONFIG_DIR', '/root/frps-service'),
+        'helper_image': getattr(settings, 'FRP_HELPER_IMAGE', 'alpine:latest'),
+    }
+
+
+def format_frp_allow_ports(start_port, end_port):
+    """格式化 frps allow_ports 配置。"""
+    if start_port == end_port:
+        return str(start_port)
+    return f"{start_port}-{end_port}"
+
+
+def validate_frp_range(start_port, end_port):
+    """校验 FRP 端口范围。"""
+    if start_port > end_port:
+        raise ValidationError({'port_pool_end': '端口池结束值必须大于等于起始值'})
+    if start_port < 1 or end_port > 65535:
+        raise ValidationError({'port_pool_start': '端口必须位于 1-65535 范围内'})
+
+
+def get_used_frp_ports(exclude_device=None):
+    """获取已使用的 FRP SSH 端口。"""
+    queryset = Device.objects.filter(frp_enabled=True).exclude(frp_ssh_port__isnull=True)
+    if exclude_device is not None:
+        queryset = queryset.exclude(pk=exclude_device.pk)
+    return set(queryset.values_list('frp_ssh_port', flat=True))
+
+
+def release_device_frp_ports(device, save=True):
+    """释放设备的 FRP 端口。"""
+    device.frp_ssh_port = None
+    device.frp_web_port = None
+    device.frp_status = 'disconnected'
+    device.frp_error_message = ''
+    if save:
+        device.save(update_fields=['frp_ssh_port', 'frp_web_port', 'frp_status', 'frp_error_message'])
+
+
+def mark_device_pending_agent_update(device):
+    """标记设备在下次心跳时更新 Agent。"""
+    if not device.config:
+        device.config = {}
+    if device.config.get('agent_version') == AGENT_VERSION:
+        return False
+    if device.config.get('pending_agent_update'):
+        return False
+    device.config['pending_agent_update'] = True
+    device.save(update_fields=['config'])
+    return True
+
+
+def should_disable_frp_for_device(device, frp_config=None):
+    """判断设备是否需要停用 FRP。"""
+    frp_config = frp_config or get_frp_config()
+    return (not frp_config.is_active) or (not device.frp_enabled)
+
+
+def is_frp_enabled_for_device(device, frp_config=None):
+    """判断设备当前是否应该拿到 FRP 配置。"""
+    frp_config = frp_config or get_frp_config()
+    return frp_config.is_active and device.frp_enabled and bool(device.frp_ssh_port)
+
+
+def allocate_frp_ssh_port(device, frp_config=None):
     """
     为设备分配 SSH 端口（幂等操作）
     - 如果已分配，直接返回
     - 如果未分配，从端口池中分配一个可用端口
     """
-    # 已分配则跳过
-    if device.frp_ssh_port:
-        return device.frp_ssh_port
-    
-    frp_cfg = get_frp_config()
-    if not frp_cfg.get('enabled'):
+    if not device.frp_enabled:
         return None
-    
-    ssh_pool = frp_cfg.get('port_pools', {}).get('ssh', {})
-    start_port = ssh_pool.get('start', 39983)
-    end_port = ssh_pool.get('end', 39993)
-    
-    # 获取所有已分配的 SSH 端口
-    used_ports = set(
-        Device.objects.exclude(frp_ssh_port__isnull=True)
-        .values_list('frp_ssh_port', flat=True)
-    )
-    
-    # 找到第一个可用端口
-    for port in range(start_port, end_port + 1):
+
+    frp_config = frp_config or get_frp_config()
+
+    if device.frp_ssh_port and frp_config.port_pool_start <= device.frp_ssh_port <= frp_config.port_pool_end:
+        return device.frp_ssh_port
+
+    if not frp_config.is_active:
+        return None
+
+    used_ports = get_used_frp_ports(exclude_device=device)
+
+    for port in range(frp_config.port_pool_start, frp_config.port_pool_end + 1):
         if port not in used_ports:
             device.frp_ssh_port = port
             device.frp_status = 'disconnected'
-            device.save(update_fields=['frp_ssh_port', 'frp_status'])
+            device.frp_error_message = ''
+            device.save(update_fields=['frp_ssh_port', 'frp_status', 'frp_error_message'])
             return port
-    
-    # 端口池耗尽
+
     return None
 
 
-def build_frp_config_for_device(device):
+def plan_frp_port_assignments(frp_config):
+    """根据当前端口池为启用 FRP 的设备规划端口。"""
+    validate_frp_range(frp_config.port_pool_start, frp_config.port_pool_end)
+
+    enabled_devices = list(Device.objects.filter(frp_enabled=True).order_by('created_at', 'id'))
+    used_ports = set()
+    assignments = {}
+    pending_devices = []
+
+    for device in enabled_devices:
+        current_port = device.frp_ssh_port
+        if (
+            current_port
+            and frp_config.port_pool_start <= current_port <= frp_config.port_pool_end
+            and current_port not in used_ports
+        ):
+            assignments[device.pk] = current_port
+            used_ports.add(current_port)
+        else:
+            pending_devices.append(device)
+
+    next_port = frp_config.port_pool_start
+    for device in pending_devices:
+        while next_port in used_ports and next_port <= frp_config.port_pool_end:
+            next_port += 1
+
+        if next_port > frp_config.port_pool_end:
+            raise ValidationError({
+                'port_pool_end': f'端口池容量不足，当前启用 FRP 的设备数为 {len(enabled_devices)}'
+            })
+
+        assignments[device.pk] = next_port
+        used_ports.add(next_port)
+        next_port += 1
+
+    return assignments
+
+
+def apply_frp_port_assignments(frp_config, assignments=None):
+    """应用 FRP 端口规划，同时清理已禁用设备的旧端口。"""
+    assignments = assignments or plan_frp_port_assignments(frp_config)
+
+    for device in Device.objects.filter(frp_enabled=False):
+        if device.frp_ssh_port or device.frp_web_port:
+            release_device_frp_ports(device)
+
+    for device in Device.objects.filter(frp_enabled=True):
+        expected_port = assignments.get(device.pk)
+        if expected_port is None:
+            continue
+
+        update_fields = []
+        if device.frp_ssh_port != expected_port:
+            device.frp_ssh_port = expected_port
+            device.frp_status = 'disconnected'
+            device.frp_error_message = ''
+            update_fields.extend(['frp_ssh_port', 'frp_status', 'frp_error_message'])
+
+        if update_fields:
+            device.save(update_fields=update_fields)
+
+
+def build_frp_config_for_device(device, frp_config=None):
     """
     构建设备的 FRP 配置（供 Agent 拉取）
     返回 None 表示无配置
     """
-    frp_cfg = get_frp_config()
-    if not frp_cfg.get('enabled') or not device.frp_ssh_port:
+    frp_config = frp_config or get_frp_config()
+
+    if should_disable_frp_for_device(device, frp_config):
         return None
-    
+
+    ssh_port = device.frp_ssh_port or allocate_frp_ssh_port(device, frp_config=frp_config)
+    if not ssh_port:
+        return None
+
     return {
-        'server_addr': frp_cfg.get('server_addr'),
-        'server_port': frp_cfg.get('server_port'),
-        'token': frp_cfg.get('token'),
-        'config_version': frp_cfg.get('config_version', 1),
+        'server_addr': frp_config.server_addr,
+        'server_port': frp_config.server_port,
+        'token': frp_config.token,
+        'config_version': frp_config.config_version,
         'tunnels': {
             'ssh': {
                 'type': 'tcp',
                 'local_port': 22,
-                'remote_port': device.frp_ssh_port,
+                'remote_port': ssh_port,
             }
-            # 预留 web 隧道配置
-            # 'web': {
-            #     'type': 'tcp',
-            #     'local_port': 8000,
-            #     'remote_port': device.frp_web_port,
-            # }
         }
+    }
+
+
+def run_docker_command(args, input_text=None, timeout=60, check=True):
+    """在平台容器中调用 Docker CLI。"""
+    result = subprocess.run(
+        ['docker', *args],
+        input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout
+    )
+    if check and result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or 'Docker 命令执行失败')
+    return result
+
+
+def run_frp_host_helper(command, input_text=None, timeout=60, check=True):
+    """通过临时容器访问宿主机 FRP 配置目录。"""
+    runtime = get_frp_runtime_settings()
+    args = [
+        'run', '--rm', '-i',
+        '-v', f"{runtime['config_dir']}:/work",
+        runtime['helper_image'],
+        'sh', '-lc', command,
+    ]
+    return run_docker_command(args, input_text=input_text, timeout=timeout, check=check)
+
+
+def get_frps_service_snapshot():
+    """获取 FRP 服务容器状态。"""
+    runtime = get_frp_runtime_settings()
+    result = run_docker_command(
+        ['inspect', runtime['container_name'], '--format', '{{json .State}}'],
+        check=False
+    )
+    if result.returncode != 0:
+        return {
+            'container_name': runtime['container_name'],
+            'status': 'missing',
+            'running': False,
+            'started_at': None,
+            'error': (result.stderr or result.stdout).strip(),
+        }
+
+    try:
+        state = json.loads(result.stdout.strip() or '{}')
+    except json.JSONDecodeError as exc:
+        return {
+            'container_name': runtime['container_name'],
+            'status': 'error',
+            'running': False,
+            'started_at': None,
+            'error': str(exc),
+        }
+
+    return {
+        'container_name': runtime['container_name'],
+        'status': state.get('Status', 'unknown'),
+        'running': bool(state.get('Running')),
+        'started_at': state.get('StartedAt'),
+        'error': state.get('Error') or '',
+    }
+
+
+def render_frps_ini(frp_config, existing_content=''):
+    """根据数据库配置生成 frps.ini 内容。"""
+    parser = configparser.RawConfigParser()
+    parser.optionxform = str
+    if existing_content.strip():
+        parser.read_string(existing_content)
+
+    if not parser.has_section('common'):
+        parser.add_section('common')
+
+    parser.set('common', 'bind_port', str(frp_config.server_port))
+    parser.set('common', 'token', str(frp_config.token))
+    parser.set(
+        'common',
+        'allow_ports',
+        format_frp_allow_ports(frp_config.port_pool_start, frp_config.port_pool_end)
+    )
+
+    if not parser.has_option('common', 'log_file'):
+        parser.set('common', 'log_file', '/var/log/frps/frps.log')
+    if not parser.has_option('common', 'log_level'):
+        parser.set('common', 'log_level', 'info')
+    if not parser.has_option('common', 'log_max_days'):
+        parser.set('common', 'log_max_days', '7')
+
+    sio = StringIO()
+    parser.write(sio)
+    return sio.getvalue().strip() + '\n'
+
+
+def write_frps_ini(content):
+    """写入宿主机 FRP 配置文件，并保留备份。"""
+    backup_name = f"frps-{timezone.now().strftime('%Y%m%d-%H%M%S')}.ini.bak"
+    command = (
+        'set -e; '
+        'mkdir -p /work/backups; '
+        f'if [ -f /work/frps.ini ]; then cp /work/frps.ini /work/backups/{backup_name}; fi; '
+        'cat > /work/frps.ini.tmp; '
+        'mv /work/frps.ini.tmp /work/frps.ini'
+    )
+    run_frp_host_helper(command, input_text=content, timeout=120)
+    runtime = get_frp_runtime_settings()
+    return os.path.join(runtime['config_dir'], 'backups', backup_name)
+
+
+def sync_frps_service_config(frp_config, restart_if_running=True):
+    """同步数据库配置到 frps.ini，必要时重启 FRP 服务。"""
+    current_result = run_frp_host_helper('if [ -f /work/frps.ini ]; then cat /work/frps.ini; fi', check=False)
+    current_content = current_result.stdout or ''
+    new_content = render_frps_ini(frp_config, existing_content=current_content)
+    backup_path = write_frps_ini(new_content)
+
+    snapshot = get_frps_service_snapshot()
+    if restart_if_running and snapshot['running']:
+        runtime = get_frp_runtime_settings()
+        restart_result = run_docker_command(['restart', runtime['container_name']], check=False, timeout=120)
+        if restart_result.returncode != 0:
+            write_frps_ini(current_content)
+            run_docker_command(['restart', runtime['container_name']], check=False, timeout=120)
+            raise RuntimeError(restart_result.stderr.strip() or restart_result.stdout.strip() or 'FRP 服务重启失败')
+
+    return {
+        'backup_path': backup_path,
+        'service': get_frps_service_snapshot(),
     }
 
 
@@ -110,7 +386,12 @@ class DeviceViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         """Agent 调用的接口不需要认证"""
-        if self.action in ['register', 'heartbeat', 'retrieve', 'list', 'upload_logs', 'pending_config', 'config_result', 'pending_log_tasks', 'report_log_task']:
+        if self.action in [
+            'register', 'heartbeat', 'retrieve', 'list', 'upload_logs',
+            'pending_config', 'config_result', 'pending_log_tasks', 'report_log_task',
+            'fetch_frp_config', 'report_frp_status', 'pending_system_tasks', 'report_system_task',
+            'deployment', 'progress',
+        ]:
             return [AllowAny()]
         return [IsAuthenticated()]
     
@@ -152,11 +433,10 @@ class DeviceViewSet(viewsets.ModelViewSet):
             device.ip_address = ip_address
             device.last_heartbeat = timezone.now()
             device.save()
-        
-        # 🔥 FRP 自动分配端口（新设备 or 未分配端口的设备）
-        frp_port = allocate_frp_ssh_port(device)
-        frp_config = build_frp_config_for_device(device) if frp_port else None
-        
+
+        frp_server_config = get_frp_config()
+        frp_config = build_frp_config_for_device(device, frp_server_config)
+
         # 🔥 自动部署逻辑：如果设备配置了自动部署项目，创建部署任务
         auto_deploy_triggered = False
         if device.auto_deploy_project:
@@ -186,6 +466,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
             "auto_deploy_project": device.auto_deploy_project.name if device.auto_deploy_project else None,
             # FRP 配置（Agent 据此配置 frpc）
             "frp_config": frp_config,
+            "frp_disable_required": should_disable_frp_for_device(device, frp_server_config),
         })
     
     @action(detail=True, methods=['post'], permission_classes=[AllowAny])
@@ -280,14 +561,20 @@ class DeviceViewSet(viewsets.ModelViewSet):
         
         # 🔥 FRP 配置版本检测：如果服务端配置版本更新，下发 update_frp 指令
         frp_cfg = get_frp_config()
-        if frp_cfg.get('enabled') and device.frp_ssh_port:
-            server_frp_version = frp_cfg.get('config_version', 1)
+        if should_disable_frp_for_device(device, frp_cfg):
+            response_data['frp_disable_required'] = True
+        elif device.frp_enabled:
+            if not device.frp_ssh_port:
+                allocate_frp_ssh_port(device, frp_config=frp_cfg)
+
+        if is_frp_enabled_for_device(device, frp_cfg):
+            server_frp_version = frp_cfg.config_version
             agent_frp_version = device.config.get('frp_config_version', 0) if device.config else 0
             
             if server_frp_version > agent_frp_version:
                 # 配置版本变更，需要更新
                 response_data['frp_update_required'] = True
-                response_data['frp_config'] = build_frp_config_for_device(device)
+                response_data['frp_config'] = build_frp_config_for_device(device, frp_cfg)
         
         return Response(response_data)
     
@@ -972,45 +1259,122 @@ class DeviceViewSet(viewsets.ModelViewSet):
     # ==================== FRP 管理 API ====================
 
     @action(detail=True, methods=['post'])
+    def set_frp_enabled(self, request, device_id=None):
+        """
+        设置设备是否启用 FRP
+        POST /api/devices/{device_id}/set_frp_enabled/
+        Body: {"enabled": true}
+        """
+        device = self.get_object()
+        enabled = request.data.get('enabled')
+
+        if enabled is None:
+            return Response({'error': 'enabled参数必填'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if isinstance(enabled, bool):
+            pass
+        elif isinstance(enabled, str):
+            normalized = enabled.strip().lower()
+            if normalized in {'true', '1', 'yes', 'on'}:
+                enabled = True
+            elif normalized in {'false', '0', 'no', 'off'}:
+                enabled = False
+            else:
+                return Response({'error': 'enabled参数格式错误'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            enabled = bool(enabled)
+
+        frp_cfg = get_frp_config()
+
+        if enabled and not device.frp_enabled:
+            device.frp_enabled = True
+            device.save(update_fields=['frp_enabled'])
+
+            if frp_cfg.is_active:
+                port = allocate_frp_ssh_port(device, frp_config=frp_cfg)
+                if not port:
+                    device.frp_enabled = False
+                    device.save(update_fields=['frp_enabled'])
+                    return Response({'error': '端口池已耗尽，无法启用该设备的 FRP'}, status=status.HTTP_400_BAD_REQUEST)
+
+                return Response({
+                    'message': '设备 FRP 已启用',
+                    'frp_enabled': True,
+                    'ssh_port': port,
+                    'ssh_command': device.ssh_connection_string,
+                })
+
+            return Response({
+                'message': '设备 FRP 已启用，待平台侧 FRP 服务启用后会自动分配并下发配置',
+                'frp_enabled': True,
+                'ssh_port': device.frp_ssh_port,
+                'ssh_command': device.ssh_connection_string,
+            })
+
+        if not enabled and device.frp_enabled:
+            device.frp_enabled = False
+            release_device_frp_ports(device, save=False)
+            device.save(update_fields=['frp_enabled', 'frp_ssh_port', 'frp_web_port', 'frp_status', 'frp_error_message'])
+            mark_device_pending_agent_update(device)
+
+            return Response({
+                'message': '设备 FRP 已禁用，在线设备会在下次心跳时停用本地 frpc',
+                'frp_enabled': False,
+            })
+
+        return Response({
+            'message': '设备 FRP 状态未变化',
+            'frp_enabled': device.frp_enabled,
+            'ssh_port': device.frp_ssh_port,
+            'ssh_command': device.ssh_connection_string,
+        })
+
+    @action(detail=True, methods=['post'])
     def allocate_frp_ports(self, request, device_id=None):
         """
         为设备分配 FRP 端口（手动触发）
         POST /api/devices/{device_id}/allocate_frp_ports/
         """
         device = self.get_object()
-        
+
+        if not device.frp_enabled:
+            return Response({'error': '该设备已禁用 FRP，请先启用后再分配端口'}, status=status.HTTP_400_BAD_REQUEST)
+
+        frp_cfg = get_frp_config()
+
         # 检查是否已分配
-        if device.frp_ssh_port:
-            frp_cfg = get_frp_config()
+        if device.frp_ssh_port and frp_cfg.port_pool_start <= device.frp_ssh_port <= frp_cfg.port_pool_end:
             return Response({
                 'message': '设备已分配端口',
                 'ssh_port': device.frp_ssh_port,
-                'ssh_command': f"ssh -p {device.frp_ssh_port} jetson@{frp_cfg.get('server_addr')}"
+                'ssh_command': device.ssh_connection_string or f"ssh -p {device.frp_ssh_port} jetson@{frp_cfg.server_addr}"
             })
-        
+
         # 分配端口
-        port = allocate_frp_ssh_port(device)
+        port = allocate_frp_ssh_port(device, frp_config=frp_cfg)
         if not port:
             return Response({'error': '端口池已耗尽或 FRP 未启用'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        frp_cfg = get_frp_config()
+
         return Response({
             'message': '端口分配成功',
             'ssh_port': port,
-            'ssh_command': f"ssh -p {port} jetson@{frp_cfg.get('server_addr')}"
+            'ssh_command': device.ssh_connection_string or f"ssh -p {port} jetson@{frp_cfg.server_addr}"
         })
 
     @action(detail=True, methods=['get'], permission_classes=[AllowAny])
     def fetch_frp_config(self, request, device_id=None):
         """
-        Agent 获取 FRP 配置（使用 settings.FRP_CONFIG）
+        Agent 获取 FRP 配置（数据库为准）
         GET /api/devices/{device_id}/fetch_frp_config/
         """
         device = self.get_object()
-        
-        frp_config = build_frp_config_for_device(device)
+
+        frp_config = build_frp_config_for_device(device, get_frp_config())
         if not frp_config:
-            return Response({'has_config': False})
+            return Response({
+                'has_config': False,
+                'disable_required': should_disable_frp_for_device(device),
+            })
         
         return Response({
             'has_config': True,
@@ -1029,9 +1393,13 @@ class DeviceViewSet(viewsets.ModelViewSet):
         frp_status = request.data.get('status')
         error_message = request.data.get('error_message', '')
 
-        device.frp_status = frp_status
+        if should_disable_frp_for_device(device):
+            device.frp_status = 'disconnected'
+            device.frp_error_message = ''
+        else:
+            device.frp_status = frp_status
+            device.frp_error_message = error_message
         device.frp_last_check = timezone.now()
-        device.frp_error_message = error_message
         device.save()
 
         return Response({'message': 'ok'})
@@ -1123,6 +1491,150 @@ class DeviceViewSet(viewsets.ModelViewSet):
             'created_at': timezone.now().isoformat()
         }
         device.save()
+
+
+class FrpManagementViewSet(viewsets.ViewSet):
+    """FRP 全局管理 API。"""
+    permission_classes = [IsAuthenticated]
+
+    def _build_overview(self):
+        frp_config = get_frp_config()
+        config_data = FrpServerConfigSerializer(frp_config).data
+        service = get_frps_service_snapshot()
+        devices = FrpDeviceSerializer(
+            Device.objects.order_by('created_at', 'id'),
+            many=True
+        ).data
+        return {
+            'config': config_data,
+            'service': service,
+            'devices': devices,
+        }
+
+    def list(self, request):
+        """获取 FRP 配置总览。"""
+        return Response(self._build_overview())
+
+    @action(detail=False, methods=['patch'], url_path='config')
+    def update_config(self, request):
+        """更新 FRP 配置并同步到 FRP 服务。"""
+        frp_config = get_frp_config()
+        serializer = FrpServerConfigSerializer(frp_config, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+
+        validated_data = serializer.validated_data
+        candidate = {
+            'server_addr': validated_data.get('server_addr', frp_config.server_addr),
+            'server_port': validated_data.get('server_port', frp_config.server_port),
+            'token': validated_data.get('token', frp_config.token),
+            'port_pool_start': validated_data.get('port_pool_start', frp_config.port_pool_start),
+            'port_pool_end': validated_data.get('port_pool_end', frp_config.port_pool_end),
+            'is_active': validated_data.get('is_active', frp_config.is_active),
+            'description': validated_data.get('description', frp_config.description),
+        }
+        validate_frp_range(candidate['port_pool_start'], candidate['port_pool_end'])
+
+        old_config_state = {
+            'server_addr': frp_config.server_addr,
+            'server_port': frp_config.server_port,
+            'token': frp_config.token,
+            'port_pool_start': frp_config.port_pool_start,
+            'port_pool_end': frp_config.port_pool_end,
+            'is_active': frp_config.is_active,
+            'config_version': frp_config.config_version,
+            'description': frp_config.description,
+        }
+        old_device_state = {
+            device.pk: {
+                'frp_ssh_port': device.frp_ssh_port,
+                'frp_web_port': device.frp_web_port,
+                'frp_status': device.frp_status,
+                'frp_error_message': device.frp_error_message,
+                'config': json.loads(json.dumps(device.config or {})),
+            }
+            for device in Device.objects.all()
+        }
+
+        for field, value in candidate.items():
+            setattr(frp_config, field, value)
+
+        assignments = plan_frp_port_assignments(frp_config)
+
+        config_changed = any(candidate[key] != old_config_state[key] for key in candidate)
+        if config_changed:
+            frp_config.config_version = old_config_state['config_version'] + 1
+
+        try:
+            with transaction.atomic():
+                frp_config.save()
+                apply_frp_port_assignments(frp_config, assignments=assignments)
+                if not frp_config.is_active:
+                    for device in Device.objects.filter(frp_enabled=True):
+                        mark_device_pending_agent_update(device)
+
+            sync_result = sync_frps_service_config(frp_config, restart_if_running=True)
+        except Exception as exc:
+            with transaction.atomic():
+                for field, value in old_config_state.items():
+                    setattr(frp_config, field, value)
+                frp_config.save()
+
+                for device in Device.objects.all():
+                    original = old_device_state[device.pk]
+                    device.frp_ssh_port = original['frp_ssh_port']
+                    device.frp_web_port = original['frp_web_port']
+                    device.frp_status = original['frp_status']
+                    device.frp_error_message = original['frp_error_message']
+                    device.config = original['config']
+                    device.save(update_fields=['frp_ssh_port', 'frp_web_port', 'frp_status', 'frp_error_message', 'config'])
+
+            raise ValidationError({'error': f'FRP 配置保存失败: {exc}'})
+
+        return Response({
+            'message': 'FRP 配置已保存并同步到服务',
+            'backup_path': sync_result['backup_path'],
+            **self._build_overview(),
+        })
+
+    @action(detail=False, methods=['post'], url_path='sync')
+    def sync(self, request):
+        """将数据库中的 FRP 配置重新同步到 FRP 服务。"""
+        result = sync_frps_service_config(get_frp_config(), restart_if_running=True)
+        return Response({
+            'message': 'FRP 配置已重新同步',
+            'backup_path': result['backup_path'],
+            **self._build_overview(),
+        })
+
+    @action(detail=False, methods=['post'], url_path='service')
+    def service_control(self, request):
+        """控制 FRP 服务容器启停。"""
+        action_name = request.data.get('action')
+        runtime = get_frp_runtime_settings()
+
+        if action_name not in {'start', 'stop', 'restart'}:
+            return Response({'error': 'action 仅支持 start/stop/restart'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if action_name in {'start', 'restart'}:
+            sync_frps_service_config(get_frp_config(), restart_if_running=False)
+
+        command = {
+            'start': ['start', runtime['container_name']],
+            'stop': ['stop', runtime['container_name']],
+            'restart': ['restart', runtime['container_name']],
+        }[action_name]
+
+        result = run_docker_command(command, check=False, timeout=120)
+        if result.returncode != 0:
+            return Response(
+                {'error': result.stderr.strip() or result.stdout.strip() or 'FRP 服务操作失败'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response({
+            'message': f'FRP 服务已执行 {action_name}',
+            **self._build_overview(),
+        })
 
 
 # ==================== Agent 版本管理 API ====================
@@ -1728,6 +2240,7 @@ def get_install_script(request):
 set -e
 
 CLOUD_SERVER="{server_url}"
+PYTHON_BIN="/usr/bin/python3"
 
 echo "========================================"
 echo "设备管理平台 - 一键安装"
@@ -1738,10 +2251,19 @@ echo ""
 # 1. 安装依赖
 echo "[1/4] 安装依赖..."
 apt-get update -qq > /dev/null 2>&1
-apt-get install -y python3 python3-pip docker.io curl 2>&1 | grep -v "^W:" || true
-echo "  - Python3和Docker已安装"
-pip3 install -q requests psutil 2>&1 | grep -v "Requirement already satisfied" || true
-echo "  - Python依赖已安装"
+apt-get install -y python3 python3-requests python3-psutil python3-yaml curl
+echo "  - Python3 和 Agent 依赖已安装"
+if ! "$PYTHON_BIN" -c "import requests, psutil, yaml" >/dev/null 2>&1; then
+    echo "  - Python依赖校验失败"
+    exit 1
+fi
+echo "  - Python依赖校验通过"
+if ! command -v docker >/dev/null 2>&1; then
+    apt-get install -y docker.io
+    echo "  - Docker 已安装"
+else
+    echo "  - Docker 已存在，跳过安装"
+fi
 systemctl enable docker > /dev/null 2>&1 || true
 systemctl start docker > /dev/null 2>&1 || true
 echo "  - Docker服务已启动"
@@ -1796,7 +2318,7 @@ After=network.target docker.service
 Type=simple
 User=root
 Environment="CLOUD_SERVER=$CLOUD_SERVER"
-ExecStart=/usr/bin/python3 /opt/device-agent/agent.py
+ExecStart=$PYTHON_BIN /opt/device-agent/agent.py
 Restart=always
 RestartSec=10
 

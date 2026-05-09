@@ -180,7 +180,7 @@
       </el-card>
 
       <!-- 远程连接信息 -->
-      <el-card v-if="device.frp_ssh_port" shadow="hover" class="info-card" style="margin-top: 20px">
+      <el-card v-if="device.frp_enabled !== false && device.frp_ssh_port" shadow="hover" class="info-card" style="margin-top: 20px">
         <template #header>
           <div class="card-header-content">
             <span class="card-title">远程连接 (SSH)</span>
@@ -217,12 +217,20 @@
       </el-card>
       
       <!-- 如果没有分配 FRP 端口，显示分配按钮 -->
-      <el-card v-else shadow="hover" class="info-card" style="margin-top: 20px">
+      <el-card v-else-if="device.frp_enabled !== false" shadow="hover" class="info-card" style="margin-top: 20px">
         <template #header>
           <span class="card-title">远程连接 (SSH)</span>
         </template>
         <el-empty description="尚未分配 SSH 端口" :image-size="60">
           <el-button type="primary" @click="handleAllocateFrpPort">分配 SSH 端口</el-button>
+        </el-empty>
+      </el-card>
+      <el-card v-else shadow="hover" class="info-card" style="margin-top: 20px">
+        <template #header>
+          <span class="card-title">远程连接 (SSH)</span>
+        </template>
+        <el-empty description="该设备已禁用 FRP" :image-size="60">
+          <el-button type="primary" @click="router.push('/frp')">前往 FRP 管理</el-button>
         </el-empty>
       </el-card>
 
@@ -877,7 +885,7 @@ const sshCommand = computed(() => {
   if (!device.value.frp_ssh_port) {
     return ''
   }
-  return `ssh -p ${device.value.frp_ssh_port} jetson@${device.value.ip_address || '127.0.0.1'}`
+  return ''
 })
 
 const getFrpTagType = (status: DisplayFrpStatus) => {

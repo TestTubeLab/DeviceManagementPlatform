@@ -205,3 +205,13 @@ export const allocateFrpPorts = (deviceId: string) => {
   }>(`/devices/${deviceId}/allocate_frp_ports/`)
 }
 
+// 启用/禁用设备 FRP
+export const setDeviceFrpEnabled = (deviceId: string, enabled: boolean) => {
+  return request.post<any, {
+    message: string
+    frp_enabled: boolean
+    ssh_port?: number | null
+    ssh_command?: string | null
+  }>(`/devices/${deviceId}/set_frp_enabled/`, { enabled })
+}
+

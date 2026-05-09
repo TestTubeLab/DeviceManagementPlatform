@@ -55,6 +55,10 @@
             <el-icon><List /></el-icon>
             <span>任务管理</span>
           </el-menu-item>
+          <el-menu-item index="/frp">
+            <el-icon><Connection /></el-icon>
+            <span>FRP管理</span>
+          </el-menu-item>
         </el-menu>
       </el-aside>
       
@@ -110,7 +114,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Monitor, DataLine, List, Bell, User, FolderOpened, SwitchButton } from '@element-plus/icons-vue'
+import { Monitor, DataLine, List, Bell, User, FolderOpened, SwitchButton, Connection } from '@element-plus/icons-vue'
 import { logout, getStoredUser, clearAuth } from '@/api/auth'
 import { getProjectDeployments, type ProjectDeployment } from '@/api/project'
 import {

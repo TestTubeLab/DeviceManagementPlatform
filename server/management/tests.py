@@ -1,3 +1,122 @@
-from django.test import TestCase
+from unittest.mock import patch
 
-# Create your tests here.
+from django.contrib.auth import get_user_model
+from rest_framework.test import APITestCase
+
+from .models import Device, FrpServerConfig
+
+
+class FrpManagementTests(APITestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(username='tester', password='secret123')
+        self.frp_config = FrpServerConfig.objects.create(
+            server_addr='212.64.81.95',
+            server_port=80,
+            token='198631',
+            port_pool_start=4430,
+            port_pool_end=4435,
+            is_active=True,
+            config_version=1,
+            description='test',
+        )
+
+    def test_fetch_frp_config_reads_database_and_allocates_port(self):
+        device = Device.objects.create(
+            device_id='DEV-fetch',
+            name='Fetch Device',
+            ip_address='10.0.0.10',
+            frp_enabled=True,
+        )
+
+        response = self.client.get(f'/api/devices/{device.device_id}/fetch_frp_config/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['has_config'])
+        self.assertEqual(response.data['server_addr'], '212.64.81.95')
+        self.assertEqual(response.data['server_port'], 80)
+        self.assertEqual(response.data['config_version'], 1)
+        self.assertEqual(response.data['tunnels']['ssh']['remote_port'], 4430)
+
+        device.refresh_from_db()
+        self.assertEqual(device.frp_ssh_port, 4430)
+
+    def test_fetch_frp_config_returns_disable_required_for_disabled_device(self):
+        device = Device.objects.create(
+            device_id='DEV-disabled',
+            name='Disabled Device',
+            ip_address='10.0.0.11',
+            frp_enabled=False,
+            frp_ssh_port=4430,
+        )
+
+        response = self.client.get(f'/api/devices/{device.device_id}/fetch_frp_config/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['has_config'])
+        self.assertTrue(response.data['disable_required'])
+
+    def test_set_frp_enabled_disable_releases_port_and_marks_agent_update(self):
+        self.client.force_authenticate(user=self.user)
+        device = Device.objects.create(
+            device_id='DEV-toggle',
+            name='Toggle Device',
+            ip_address='10.0.0.12',
+            frp_enabled=True,
+            frp_ssh_port=4430,
+            config={'agent_version': '1.6.0'},
+        )
+
+        response = self.client.post(
+            f'/api/devices/{device.device_id}/set_frp_enabled/',
+            {'enabled': False},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['frp_enabled'])
+
+        device.refresh_from_db()
+        self.assertFalse(device.frp_enabled)
+        self.assertIsNone(device.frp_ssh_port)
+        self.assertTrue(device.config.get('pending_agent_update'))
+
+    @patch('management.views.sync_frps_service_config')
+    def test_update_frp_config_reassigns_ports_and_bumps_version(self, mock_sync):
+        self.client.force_authenticate(user=self.user)
+        mock_sync.return_value = {
+            'backup_path': '/root/frps-service/backups/frps-test.ini.bak',
+            'service': {'status': 'running', 'running': True},
+        }
+
+        device_a = Device.objects.create(
+            device_id='DEV-a',
+            name='Device A',
+            frp_enabled=True,
+            frp_ssh_port=4430,
+        )
+        device_b = Device.objects.create(
+            device_id='DEV-b',
+            name='Device B',
+            frp_enabled=True,
+            frp_ssh_port=4431,
+        )
+
+        response = self.client.patch(
+            '/api/frp/config/',
+            {
+                'port_pool_start': 4500,
+                'port_pool_end': 4501,
+                'server_addr': 'frp.example.com',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.frp_config.refresh_from_db()
+        device_a.refresh_from_db()
+        device_b.refresh_from_db()
+
+        self.assertEqual(self.frp_config.config_version, 2)
+        self.assertEqual(self.frp_config.server_addr, 'frp.example.com')
+        self.assertEqual({device_a.frp_ssh_port, device_b.frp_ssh_port}, {4500, 4501})

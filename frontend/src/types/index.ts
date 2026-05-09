@@ -10,6 +10,9 @@ export type ServiceStatus = 'healthy' | 'unhealthy' | 'unknown'
 // FRP 状态类型
 export type FrpStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
 
+// FRP 服务状态类型
+export type FrpServiceStatus = 'running' | 'exited' | 'created' | 'restarting' | 'paused' | 'dead' | 'missing' | 'error' | 'unknown'
+
 // 设备信息
 export interface Device {
   id: number
@@ -44,12 +47,47 @@ export interface Device {
   computed_service_status?: ServiceStatus
   agent_version?: string
   // FRP 远程连接相关字段
+  frp_enabled?: boolean
   frp_ssh_port?: number | null
   frp_web_port?: number | null
   frp_status?: FrpStatus
   frp_last_check?: string | null
   frp_error_message?: string
   ssh_connection_string?: string | null
+}
+
+export interface FrpConfig {
+  id: number
+  server_addr: string
+  server_port: number
+  token: string
+  port_pool_start: number
+  port_pool_end: number
+  is_active: boolean
+  config_version: number
+  description: string
+  available_ports: number[]
+  total_ports: number
+  used_ports_count: number
+  available_ports_count: number
+  enabled_devices_count: number
+  connected_devices_count: number
+}
+
+export interface FrpService {
+  container_name: string
+  status: FrpServiceStatus
+  running: boolean
+  started_at: string | null
+  error?: string
+}
+
+export interface FrpOverview {
+  config: FrpConfig
+  service: FrpService
+  devices: Device[]
+  message?: string
+  backup_path?: string
 }
 
 // 部署任务状态

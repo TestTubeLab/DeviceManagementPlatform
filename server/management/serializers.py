@@ -50,6 +50,32 @@ class DeviceSerializer(serializers.ModelSerializer):
         return obj.web_access_url
 
 
+class FrpDeviceSerializer(serializers.ModelSerializer):
+    """FRP 管理页设备精简序列化器"""
+    computed_status = serializers.SerializerMethodField()
+    agent_version = serializers.SerializerMethodField()
+    ssh_connection_string = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Device
+        fields = [
+            'id', 'device_id', 'name', 'ip_address',
+            'status', 'computed_status', 'last_heartbeat', 'agent_version',
+            'frp_enabled', 'frp_ssh_port', 'frp_status', 'ssh_connection_string',
+        ]
+
+    def get_computed_status(self, obj):
+        return obj.computed_status
+
+    def get_agent_version(self, obj):
+        if obj.config:
+            return obj.config.get('agent_version', 'unknown')
+        return 'unknown'
+
+    def get_ssh_connection_string(self, obj):
+        return obj.ssh_connection_string
+
+
 class DeploymentTaskSerializer(serializers.ModelSerializer):
     """部署任务序列化器"""
     device_name = serializers.CharField(source='device.name', read_only=True)
@@ -271,16 +297,38 @@ class DeviceConfigHistorySerializer(serializers.ModelSerializer):
 class FrpServerConfigSerializer(serializers.ModelSerializer):
     """FRP 服务器配置序列化器"""
     available_ports = serializers.SerializerMethodField()
+    total_ports = serializers.SerializerMethodField()
+    used_ports_count = serializers.SerializerMethodField()
+    available_ports_count = serializers.SerializerMethodField()
+    enabled_devices_count = serializers.SerializerMethodField()
+    connected_devices_count = serializers.SerializerMethodField()
 
     class Meta:
         model = FrpServerConfig
         fields = [
             'id', 'server_addr', 'server_port', 'token',
-            'port_pool_start', 'port_pool_end', 'is_active',
-            'description', 'created_at', 'updated_at', 'available_ports'
+            'port_pool_start', 'port_pool_end', 'is_active', 'config_version',
+            'description', 'created_at', 'updated_at', 'available_ports',
+            'total_ports', 'used_ports_count', 'available_ports_count',
+            'enabled_devices_count', 'connected_devices_count'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'config_version']
 
     def get_available_ports(self, obj):
         """获取可用端口列表"""
         return obj.available_ports
+
+    def get_total_ports(self, obj):
+        return obj.total_ports
+
+    def get_used_ports_count(self, obj):
+        return obj.total_ports - len(obj.available_ports)
+
+    def get_available_ports_count(self, obj):
+        return len(obj.available_ports)
+
+    def get_enabled_devices_count(self, obj):
+        return Device.objects.filter(frp_enabled=True).count()
+
+    def get_connected_devices_count(self, obj):
+        return Device.objects.filter(frp_enabled=True, frp_status='connected').count()

@@ -43,6 +43,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/TaskManage.vue'),
         meta: { title: '任务管理', icon: 'List' }
       },
+      {
+        path: 'frp',
+        name: 'FrpManage',
+        component: () => import('@/views/FrpManage.vue'),
+        meta: { title: 'FRP管理', icon: 'Connection' }
+      },
     ]
   }
 ]

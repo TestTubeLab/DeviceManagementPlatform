@@ -19,6 +19,7 @@ fi
 # 配置参数
 CLOUD_SERVER="${CLOUD_SERVER:-http://your-cloud.com/api}"
 FRP_VERSION="0.51.3"
+PYTHON_BIN="/usr/bin/python3"
 
 # 步骤1：安装Docker（如果未安装）
 echo ""
@@ -33,19 +34,25 @@ else
     echo "✓ Docker已安装"
 fi
 
-# 步骤2：安装Python3（如果未安装）
+# 步骤2：安装Python3和Agent运行依赖
 echo ""
 echo "[2/6] 检查Python3..."
-if ! command -v python3 &> /dev/null; then
+if [ ! -x "$PYTHON_BIN" ]; then
     apt-get update
-    apt-get install -y python3 python3-pip
+    apt-get install -y python3
     echo "✓ Python3安装完成"
 else
     echo "✓ Python3已安装"
 fi
 
-# 安装依赖库
-pip3 install requests psutil pyyaml -q
+echo "检查 Agent 运行依赖..."
+if ! "$PYTHON_BIN" -c "import requests, psutil, yaml" >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y python3-requests python3-psutil python3-yaml
+    echo "✓ Agent 依赖安装完成"
+else
+    echo "✓ Agent 依赖已安装"
+fi
 
 # 步骤3：创建工作目录
 echo ""
@@ -113,7 +120,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/bootstrap
 EnvironmentFile=/opt/bootstrap/.env
-ExecStart=/usr/bin/python3 /opt/bootstrap/agent.py
+ExecStart=$PYTHON_BIN /opt/bootstrap/agent.py
 Restart=always
 RestartSec=10
 

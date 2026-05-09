@@ -50,7 +50,10 @@
           <el-progress :percentage="device.cpu_usage" :stroke-width="6" :show-text="false" />
           <span class="resource-value">{{ device.cpu_usage.toFixed(1) }}%</span>
         </template>
-        <span v-else class="resource-offline">离线</span>
+        <template v-else>
+          <span class="resource-offline">离线</span>
+          <span class="resource-value resource-value-muted">--</span>
+        </template>
       </div>
       <div class="resource-item">
         <span class="resource-label">内存</span>
@@ -58,7 +61,10 @@
           <el-progress :percentage="device.memory_usage" :stroke-width="6" :show-text="false" />
           <span class="resource-value">{{ device.memory_usage.toFixed(1) }}%</span>
         </template>
-        <span v-else class="resource-offline">离线</span>
+        <template v-else>
+          <span class="resource-offline">离线</span>
+          <span class="resource-value resource-value-muted">--</span>
+        </template>
       </div>
       <div class="resource-item">
         <span class="resource-label">磁盘</span>
@@ -66,7 +72,10 @@
           <el-progress :percentage="device.disk_usage" :stroke-width="6" :show-text="false" />
           <span class="resource-value">{{ device.disk_usage.toFixed(1) }}%</span>
         </template>
-        <span v-else class="resource-offline">离线</span>
+        <template v-else>
+          <span class="resource-offline">离线</span>
+          <span class="resource-value resource-value-muted">--</span>
+        </template>
       </div>
     </div>
   </el-card>
@@ -128,6 +137,17 @@ const serviceStatusText = computed(() => {
 .device-card {
   cursor: pointer;
   transition: all 0.3s;
+  width: 100%;
+  height: 100%;
+  min-height: 390px;
+}
+
+.device-card :deep(.el-card__body) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .device-card:hover {
@@ -138,12 +158,20 @@ const serviceStatusText = computed(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  min-height: 44px;
 }
 
 .device-info {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.device-info > div {
+  min-width: 0;
 }
 
 .device-icon {
@@ -175,39 +203,56 @@ const serviceStatusText = computed(() => {
   font-size: 16px;
   font-weight: 600;
   color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .device-id {
   font-size: 12px;
   color: #909399;
   margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex: 1;
+  min-height: 132px;
 }
 
 .info-row {
   display: flex;
   justify-content: space-between;
+  gap: 12px;
   font-size: 13px;
+  min-height: 22px;
 }
 
 .label {
   color: #909399;
+  flex: 0 0 auto;
 }
 
 .value {
   color: #606266;
   font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-footer {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-top: auto;
 }
 
 .resource-item {
@@ -215,6 +260,11 @@ const serviceStatusText = computed(() => {
   grid-template-columns: 40px 1fr 50px;
   align-items: center;
   gap: 8px;
+  height: 24px;
+}
+
+.resource-item :deep(.el-progress) {
+  min-width: 0;
 }
 
 .resource-label {
@@ -232,6 +282,10 @@ const serviceStatusText = computed(() => {
   font-size: 12px;
   color: #909399;
   line-height: 24px;
+}
+
+.resource-value-muted {
+  color: #c0c4cc;
 }
 
 /* 服务状态指示器 */

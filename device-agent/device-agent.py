@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.6.0"  # Agent 版本号，每次更新递增（新增 Node.js 自动安装）
+AGENT_VERSION = "1.7.0"  # Agent 版本号，每次更新递增（新增 FRP 停用控制）
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
@@ -110,6 +110,13 @@ def register_device():
                     report_frp_status("connected")
                 else:
                     logger.error(f"FRP 配置应用失败: {error}")
+                    report_frp_status("error", error)
+            elif result.get('frp_disable_required'):
+                logger.info("服务端要求停用 FRP，开始关闭本地 frpc...")
+                success, error = disable_frp()
+                if success:
+                    report_frp_status("disconnected")
+                else:
                     report_frp_status("error", error)
             
             return registered_device_id
@@ -514,6 +521,23 @@ def apply_frp_config(frp_config):
         
     except subprocess.TimeoutExpired:
         return False, "操作超时"
+    except Exception as e:
+        return False, str(e)
+
+
+def disable_frp():
+    """
+    停用本地 FRP：停止并禁用 systemd 服务。
+    返回: (success, error_message)
+    """
+    try:
+        subprocess.run(["systemctl", "stop", FRP_SERVICE_NAME], check=False, timeout=30)
+        subprocess.run(["systemctl", "disable", FRP_SERVICE_NAME], check=False, timeout=30)
+        save_local_frp_config_version(0)
+        logger.info("frpc 服务已停止并禁用")
+        return True, ""
+    except subprocess.TimeoutExpired:
+        return False, "停用 FRP 超时"
     except Exception as e:
         return False, str(e)
 
@@ -2160,6 +2184,14 @@ def main():
                         else:
                             logger.error(f"FRP 配置更新失败: {error}")
                             report_frp_status("error", error)
+                elif command.get("frp_disable_required"):
+                    logger.info("检测到 FRP 停用指令，开始关闭本地 frpc...")
+                    success, error = disable_frp()
+                    if success:
+                        report_frp_status("disconnected")
+                    else:
+                        logger.error(f"停用 FRP 失败: {error}")
+                        report_frp_status("error", error)
             
             # 定时轮询部署任务
             if current_time - last_task_poll >= TASK_POLL_INTERVAL:
