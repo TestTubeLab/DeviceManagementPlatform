@@ -230,7 +230,6 @@ import dayjs from 'dayjs'
 import { getFrpOverview, updateFrpConfig, syncFrpConfig, controlFrpService } from '@/api/frp'
 import { setDeviceFrpEnabled } from '@/api/device'
 import type { Device, FrpOverview, FrpServiceStatus, FrpStatus } from '@/types'
-import { copyToClipboard } from '@/utils/clipboard'
 
 const router = useRouter()
 
@@ -332,12 +331,8 @@ const handleToggleDeviceFrp = async (deviceId: string, enabled: boolean) => {
 }
 
 const copyText = async (text: string) => {
-  try {
-    await copyToClipboard(text)
-    ElMessage.success('SSH 命令已复制')
-  } catch (error) {
-    ElMessage.error('复制失败，请手动复制')
-  }
+  await navigator.clipboard.writeText(text)
+  ElMessage.success('SSH 命令已复制')
 }
 
 const goToDevice = (deviceId: string) => {

@@ -650,7 +650,6 @@ import {
 } from '@/api/device'
 import { getProjects } from '@/api/project'
 import StatusBadge from '@/components/StatusBadge.vue'
-import { copyToClipboard } from '@/utils/clipboard'
 import {
   type DisplayContainerStatus,
   type DisplayFrpStatus,
@@ -914,13 +913,8 @@ const getFrpStatusText = (status: DisplayFrpStatus) => {
 const copySshCommand = () => {
   const cmd = sshCommand.value
   if (!cmd) return
-  copyToClipboard(cmd)
-    .then(() => {
-      ElMessage.success('SSH 命令已复制到剪贴板')
-    })
-    .catch(() => {
-      ElMessage.error('复制失败，请手动复制')
-    })
+  navigator.clipboard.writeText(cmd)
+  ElMessage.success('SSH 命令已复制到剪贴板')
 }
 
 const handleAllocateFrpPort = async () => {
