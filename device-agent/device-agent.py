@@ -12,6 +12,8 @@ import os
 import sys
 import time
 import json
+import socket
+import hashlib
 import subprocess
 import requests
 import psutil
@@ -30,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.7.0"  # Agent 版本号，每次更新递增（新增 FRP 停用控制）
+AGENT_VERSION = "1.7.1"  # Agent 版本号，每次更新递增（修复设备身份识别和心跳 IP 刷新）
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
@@ -48,40 +50,215 @@ FRP_CONFIG_FILE = "/etc/frp/frpc.ini"  # frpc 配置文件路径
 FRP_BINARY_PATH = "/usr/local/bin/frpc"  # frpc 二进制文件路径
 FRP_SERVICE_NAME = "frpc"  # systemd 服务名称
 FRP_LOCAL_CONFIG_VERSION = 0  # 本地配置版本（运行时更新）
+VIRTUAL_INTERFACE_PREFIXES = ('lo', 'docker', 'br-', 'veth', 'virbr', 'flannel', 'cni', 'tunl', 'dummy')
+
+
+def read_text_file(path):
+    """读取文本文件并去除空字符。"""
+    try:
+        with open(path, 'rb') as file_obj:
+            return file_obj.read().decode('utf-8', errors='ignore').replace('\x00', '').strip()
+    except OSError:
+        return ""
+
+
+def run_command(args, timeout=5):
+    """执行命令并返回标准输出。"""
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def normalize_mac_address(value):
+    """标准化 MAC 地址。"""
+    mac = str(value or "").strip().lower()
+    parts = mac.split(':')
+    if len(parts) != 6 or any(len(part) != 2 for part in parts):
+        return ""
+
+    try:
+        if all(int(part, 16) == 0 for part in parts):
+            return ""
+    except ValueError:
+        return ""
+
+    return ':'.join(parts)
+
+
+def is_virtual_interface(interface_name):
+    """判断是否为虚拟网卡。"""
+    if not interface_name or interface_name.startswith(VIRTUAL_INTERFACE_PREFIXES):
+        return True
+
+    interface_path = f"/sys/class/net/{interface_name}"
+    real_path = os.path.realpath(interface_path)
+    return '/virtual/' in real_path.replace('\\', '/')
+
+
+def list_physical_interfaces():
+    """列出物理网卡。"""
+    try:
+        interface_names = os.listdir('/sys/class/net')
+    except OSError:
+        return []
+
+    physical_interfaces = []
+    for interface_name in sorted(interface_names):
+        if is_virtual_interface(interface_name):
+            continue
+
+        mac = normalize_mac_address(read_text_file(f"/sys/class/net/{interface_name}/address"))
+        if mac:
+            physical_interfaces.append(interface_name)
+
+    return physical_interfaces
+
+
+def get_default_route_interface():
+    """获取默认路由对应的网卡。"""
+    outputs = [
+        run_command(["ip", "route", "show", "default"]),
+        run_command(["ip", "-4", "route", "get", "8.8.8.8"]),
+    ]
+
+    for output in outputs:
+        if not output:
+            continue
+
+        for line in output.splitlines():
+            parts = line.split()
+            if 'dev' in parts:
+                index = parts.index('dev')
+                if index + 1 < len(parts):
+                    return parts[index + 1]
+    return ""
+
+
+def get_interface_ipv4(interface_name):
+    """获取指定网卡的 IPv4 地址。"""
+    output = run_command(["ip", "-4", "-o", "addr", "show", "dev", interface_name, "scope", "global"])
+    if not output:
+        return ""
+
+    for line in output.splitlines():
+        parts = line.split()
+        if 'inet' in parts:
+            index = parts.index('inet')
+            if index + 1 < len(parts):
+                return parts[index + 1].split('/')[0]
+    return ""
+
+
+def get_network_identity():
+    """获取当前网络身份信息。"""
+    interfaces = list_physical_interfaces()
+    default_interface = get_default_route_interface()
+    if default_interface and default_interface in interfaces:
+        interfaces.remove(default_interface)
+        interfaces.insert(0, default_interface)
+
+    mac_addresses = []
+    primary_mac = ""
+    ip_address = ""
+
+    for interface_name in interfaces:
+        mac = normalize_mac_address(read_text_file(f"/sys/class/net/{interface_name}/address"))
+        if mac and mac not in mac_addresses:
+            mac_addresses.append(mac)
+
+        interface_ip = get_interface_ipv4(interface_name)
+        if interface_ip and not ip_address:
+            ip_address = interface_ip
+            if mac:
+                primary_mac = mac
+
+        if mac and not primary_mac:
+            primary_mac = mac
+
+    if not ip_address:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.connect(("8.8.8.8", 80))
+            ip_address = sock.getsockname()[0]
+            sock.close()
+        except OSError:
+            ip_address = ""
+
+    if not primary_mac and mac_addresses:
+        primary_mac = mac_addresses[0]
+
+    return {
+        "ip_address": ip_address,
+        "mac_address": primary_mac,
+        "mac_addresses": mac_addresses,
+    }
+
+
+def get_hardware_fingerprint(network_identity=None):
+    """获取稳定的硬件指纹。"""
+    serial_candidates = [
+        ("jetson_serial", "/proc/device-tree/serial-number"),
+        ("tegra_chip_uid", "/sys/module/tegra_fuse/parameters/tegra_chip_uid"),
+        ("soc_serial", "/sys/devices/soc0/serial_number"),
+        ("product_uuid", "/sys/class/dmi/id/product_uuid"),
+        ("product_serial", "/sys/class/dmi/id/product_serial"),
+        ("board_serial", "/sys/class/dmi/id/board_serial"),
+    ]
+
+    for source, path in serial_candidates:
+        value = read_text_file(path).lower()
+        if value:
+            return source, f"{source}:{value}"
+
+    network_identity = network_identity or get_network_identity()
+    mac_addresses = sorted(network_identity.get("mac_addresses") or [])
+    if mac_addresses:
+        return "mac_addresses", f"mac_addresses:{','.join(mac_addresses)}"
+
+    primary_mac = network_identity.get("mac_address", "")
+    if primary_mac:
+        return "mac_address", f"mac_address:{primary_mac}"
+
+    machine_id = read_text_file("/etc/machine-id").lower()
+    if machine_id:
+        return "machine_id", f"machine_id:{machine_id}"
+
+    hostname = socket.gethostname().strip().lower()
+    return "hostname", f"hostname:{hostname}"
+
+
+def build_device_id(hardware_fingerprint):
+    """根据硬件指纹生成稳定的设备 ID。"""
+    digest = hashlib.md5(hardware_fingerprint.encode('utf-8')).hexdigest()[:8]
+    return f"DEV-{digest}"
 
 # ==================== 设备注册 ====================
 def register_device():
     """注册设备到云端服务器"""
-    import socket
-    import uuid
-    import hashlib
-    
     try:
         logger.info("正在注册设备...")
-        
-        # 获取本机IP
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip_address = s.getsockname()[0]
-        s.close()
-        
-        # 获取MAC地址
-        mac = ':'.join(['{:02x}'.format((uuid.getnode() >> ele) & 0xff) 
-                       for ele in range(0, 48, 8)][::-1])
-        
-        # 基于MAC地址生成确定性的设备ID（同一设备每次注册都得到相同ID）
-        mac_hash = hashlib.md5(mac.encode()).hexdigest()[:8]
-        device_id = f"DEV-{mac_hash}"
-        
+
+        network_identity = get_network_identity()
+        identity_source, hardware_fingerprint = get_hardware_fingerprint(network_identity)
+        device_id = build_device_id(hardware_fingerprint)
+
         # 获取主机名
         hostname = socket.gethostname()
         
         # 注册到服务器
         data = {
             "device_id": device_id,
-            "mac_address": mac,
-            "ip_address": ip_address,
-            "hostname": hostname
+            "hardware_fingerprint": hardware_fingerprint,
+            "hardware_fingerprint_source": identity_source,
+            "mac_address": network_identity["mac_address"],
+            "mac_addresses": network_identity["mac_addresses"],
+            "ip_address": network_identity["ip_address"],
+            "hostname": hostname,
         }
         
         resp = requests.post(
@@ -275,6 +452,8 @@ def send_heartbeat():
     device_id = get_device_id()
     version = get_current_version()
     metrics = collect_metrics()
+    network_identity = get_network_identity()
+    _, hardware_fingerprint = get_hardware_fingerprint(network_identity)
     
     # 收集容器状态
     container_info = collect_container_status("middleware")
@@ -292,6 +471,9 @@ def send_heartbeat():
         "version": version,
         "agent_version": AGENT_VERSION,  # 上报 Agent 版本
         "frp_config_version": get_local_frp_config_version(),  # 上报 FRP 配置版本
+        "ip_address": network_identity["ip_address"],
+        "mac_address": network_identity["mac_address"],
+        "hardware_fingerprint": hardware_fingerprint,
         **metrics,
         **container_info,
         **health_info

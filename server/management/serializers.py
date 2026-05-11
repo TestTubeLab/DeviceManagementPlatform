@@ -21,7 +21,7 @@ class DeviceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Device
         fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at', 'last_heartbeat']
+        read_only_fields = ['created_at', 'updated_at', 'last_heartbeat', 'hardware_fingerprint']
 
     def get_is_online(self, obj):
         """动态计算是否在线（2分钟内有心跳）"""

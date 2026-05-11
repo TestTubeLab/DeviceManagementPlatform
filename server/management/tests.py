@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 
 from .models import Device, FrpServerConfig
+from .views import build_device_id_from_fingerprint
 
 
 class FrpManagementTests(APITestCase):
@@ -120,3 +121,139 @@ class FrpManagementTests(APITestCase):
         self.assertEqual(self.frp_config.config_version, 2)
         self.assertEqual(self.frp_config.server_addr, 'frp.example.com')
         self.assertEqual({device_a.frp_ssh_port, device_b.frp_ssh_port}, {4500, 4501})
+
+
+class DeviceIdentityTests(APITestCase):
+    def test_register_reuses_existing_device_by_hardware_fingerprint(self):
+        device = Device.objects.create(
+            device_id='DEV-existing',
+            hardware_fingerprint='jetson_serial:serial-001',
+            mac_address='00:11:22:33:44:55',
+            ip_address='192.168.8.110',
+            status='offline',
+        )
+
+        response = self.client.post(
+            '/api/devices/register/',
+            {
+                'device_id': build_device_id_from_fingerprint('jetson_serial:serial-001'),
+                'hardware_fingerprint': 'jetson_serial:serial-001',
+                'mac_address': '00:11:22:33:44:55',
+                'mac_addresses': ['00:11:22:33:44:55'],
+                'ip_address': '192.168.31.36',
+                'hostname': 'jetson-a',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['created'])
+        self.assertEqual(response.data['device_id'], 'DEV-existing')
+        self.assertEqual(Device.objects.count(), 1)
+
+        device.refresh_from_db()
+        self.assertEqual(device.ip_address, '192.168.31.36')
+        self.assertEqual(device.hardware_fingerprint, 'jetson_serial:serial-001')
+
+    def test_register_reuses_legacy_device_by_mac_and_backfills_fingerprint(self):
+        device = Device.objects.create(
+            device_id='DEV-legacy',
+            mac_address='00:11:22:33:44:55',
+            ip_address='192.168.8.110',
+            status='offline',
+        )
+
+        response = self.client.post(
+            '/api/devices/register/',
+            {
+                'device_id': build_device_id_from_fingerprint('jetson_serial:serial-002'),
+                'hardware_fingerprint': 'jetson_serial:serial-002',
+                'mac_address': '00:11:22:33:44:55',
+                'mac_addresses': ['00:11:22:33:44:55', '00:11:22:33:44:66'],
+                'ip_address': '192.168.31.40',
+                'hostname': 'jetson-b',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['created'])
+        self.assertEqual(response.data['device_id'], 'DEV-legacy')
+        self.assertEqual(Device.objects.count(), 1)
+
+        device.refresh_from_db()
+        self.assertEqual(device.ip_address, '192.168.31.40')
+        self.assertEqual(device.hardware_fingerprint, 'jetson_serial:serial-002')
+
+    def test_register_ignores_stale_device_id_when_identity_does_not_match(self):
+        Device.objects.create(
+            device_id='DEV-stale',
+            hardware_fingerprint='jetson_serial:serial-old',
+            mac_address='00:11:22:33:44:55',
+            ip_address='192.168.8.110',
+        )
+
+        response = self.client.post(
+            '/api/devices/register/',
+            {
+                'device_id': 'DEV-stale',
+                'hardware_fingerprint': 'jetson_serial:serial-new',
+                'mac_address': '00:11:22:33:44:99',
+                'mac_addresses': ['00:11:22:33:44:99'],
+                'ip_address': '192.168.31.50',
+                'hostname': 'jetson-c',
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['created'])
+        self.assertEqual(
+            response.data['device_id'],
+            build_device_id_from_fingerprint('jetson_serial:serial-new'),
+        )
+        self.assertEqual(Device.objects.count(), 2)
+
+    def test_heartbeat_refreshes_ip_mac_and_hardware_fingerprint(self):
+        device = Device.objects.create(
+            device_id='DEV-heartbeat',
+            ip_address='192.168.8.110',
+            mac_address='00:11:22:33:44:55',
+            status='offline',
+        )
+
+        response = self.client.post(
+            f'/api/devices/{device.device_id}/heartbeat/',
+            {
+                'version': 'v1.7.1',
+                'agent_version': '1.7.1',
+                'hardware_fingerprint': 'jetson_serial:serial-heartbeat',
+                'ip_address': '192.168.31.60',
+                'mac_address': '00:11:22:33:44:77',
+                'cpu_usage': 10,
+                'memory_usage': 20,
+                'disk_usage': 30,
+                'container_status': 'running',
+                'container_name': 'middleware',
+                'container_uptime': '5m',
+                'service_status': 'healthy',
+                'service_response_time': 15,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+        device.refresh_from_db()
+        self.assertEqual(device.ip_address, '192.168.31.60')
+        self.assertEqual(device.mac_address, '00:11:22:33:44:77')
+        self.assertEqual(device.hardware_fingerprint, 'jetson_serial:serial-heartbeat')
+        self.assertEqual(device.status, 'online')
+
+    def test_install_script_preserves_existing_device_id(self):
+        response = self.client.get('/api/install.sh')
+
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode('utf-8')
+        self.assertIn('保留现有设备ID', content)
+        self.assertNotIn('rm -f /etc/device-id', content)

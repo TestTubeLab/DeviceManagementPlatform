@@ -112,6 +112,9 @@ class Device(models.Model):
     
     # 基本信息
     device_id = models.CharField(max_length=100, unique=True, verbose_name='设备ID')
+    hardware_fingerprint = models.CharField(
+        max_length=255, blank=True, null=True, db_index=True, verbose_name='硬件指纹'
+    )
     name = models.CharField(max_length=200, verbose_name='设备名称', blank=True)
     location = models.CharField(max_length=200, verbose_name='安装位置', blank=True)
     mac_address = models.CharField(max_length=17, verbose_name='MAC地址', blank=True)

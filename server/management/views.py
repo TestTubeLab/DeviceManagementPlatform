@@ -2,6 +2,7 @@
 设备管理API视图
 """
 import configparser
+import hashlib
 import os
 import subprocess
 import json
@@ -30,7 +31,100 @@ from .serializers import (
 )
 
 # Agent 最新版本号（每次更新 Agent 时需要同步修改）
-AGENT_VERSION = "1.7.0"  # 新增 FRP 服务集中管理和停用能力
+AGENT_VERSION = "1.7.1"  # 修复设备身份识别和心跳 IP 刷新
+
+
+def normalize_text(value):
+    """标准化文本输入。"""
+    if value is None:
+        return ''
+    text = str(value).replace('\x00', '').strip()
+    return text
+
+
+def normalize_mac_address(value):
+    """标准化 MAC 地址。"""
+    mac = normalize_text(value).lower()
+    if not mac:
+        return ''
+
+    parts = mac.split(':')
+    if len(parts) != 6 or any(len(part) != 2 for part in parts):
+        return ''
+
+    try:
+        if all(int(part, 16) == 0 for part in parts):
+            return ''
+    except ValueError:
+        return ''
+
+    return ':'.join(parts)
+
+
+def normalize_mac_addresses(values):
+    """标准化 MAC 地址列表。"""
+    if values is None:
+        return []
+
+    if isinstance(values, str):
+        raw_values = values.split(',')
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = list(values)
+    else:
+        raw_values = [values]
+
+    normalized = []
+    for value in raw_values:
+        mac = normalize_mac_address(value)
+        if mac and mac not in normalized:
+            normalized.append(mac)
+    return normalized
+
+
+def build_device_id_from_fingerprint(hardware_fingerprint):
+    """根据硬件指纹生成稳定的设备 ID。"""
+    fingerprint = normalize_text(hardware_fingerprint)
+    if not fingerprint:
+        return ''
+    digest = hashlib.md5(fingerprint.encode('utf-8')).hexdigest()[:8]
+    return f"DEV-{digest}"
+
+
+def registration_identity_matches(device, hardware_fingerprint, mac_candidates):
+    """判断请求身份是否与现有设备记录一致。"""
+    fingerprint = normalize_text(hardware_fingerprint)
+    if fingerprint and device.hardware_fingerprint:
+        return device.hardware_fingerprint == fingerprint
+
+    if mac_candidates and device.mac_address:
+        return device.mac_address in mac_candidates
+
+    return True
+
+
+def resolve_device_for_registration(requested_device_id, canonical_device_id, hardware_fingerprint, mac_candidates):
+    """根据 device_id / 硬件指纹 / MAC 复用现有设备记录。"""
+    queryset = Device.objects.select_for_update().order_by('-last_heartbeat', '-updated_at', 'id')
+
+    for candidate_id in [requested_device_id, canonical_device_id]:
+        if not candidate_id:
+            continue
+        device = queryset.filter(device_id=candidate_id).first()
+        if device and registration_identity_matches(device, hardware_fingerprint, mac_candidates):
+            return device
+
+    fingerprint = normalize_text(hardware_fingerprint)
+    if fingerprint:
+        device = queryset.filter(hardware_fingerprint=fingerprint).first()
+        if device:
+            return device
+
+    if mac_candidates:
+        device = queryset.filter(mac_address__in=mac_candidates).first()
+        if device:
+            return device
+
+    return None
 
 
 # =============================================================================
@@ -407,32 +501,55 @@ class DeviceViewSet(viewsets.ModelViewSet):
             "hostname": "device-001"
         }
         """
-        device_id = request.data.get('device_id')
-        mac_address = request.data.get('mac_address')
-        ip_address = request.data.get('ip_address')
+        requested_device_id = normalize_text(request.data.get('device_id'))
+        hardware_fingerprint = normalize_text(request.data.get('hardware_fingerprint'))
+        canonical_device_id = build_device_id_from_fingerprint(hardware_fingerprint) or requested_device_id
+        mac_address = normalize_mac_address(request.data.get('mac_address'))
+        ip_address = normalize_text(request.data.get('ip_address'))
+        mac_candidates = normalize_mac_addresses(request.data.get('mac_addresses'))
+        if mac_address and mac_address not in mac_candidates:
+            mac_candidates.insert(0, mac_address)
         
-        if not device_id:
+        if not requested_device_id:
             return Response(
                 {"error": "device_id is required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # 获取或创建设备
-        device, created = Device.objects.get_or_create(
-            device_id=device_id,
-            defaults={
-                'mac_address': mac_address,
-                'ip_address': ip_address,
-                'status': 'waiting',
-            }
-        )
-        
-        if not created:
-            # 更新现有设备信息
-            device.mac_address = mac_address
-            device.ip_address = ip_address
-            device.last_heartbeat = timezone.now()
-            device.save()
+        with transaction.atomic():
+            device = resolve_device_for_registration(
+                requested_device_id=requested_device_id,
+                canonical_device_id=canonical_device_id,
+                hardware_fingerprint=hardware_fingerprint,
+                mac_candidates=mac_candidates,
+            )
+            created = device is None
+
+            if created:
+                device = Device.objects.create(
+                    device_id=canonical_device_id or requested_device_id,
+                    hardware_fingerprint=hardware_fingerprint or None,
+                    mac_address=mac_address,
+                    ip_address=ip_address,
+                    status='waiting',
+                )
+            else:
+                update_fields = []
+                if hardware_fingerprint and device.hardware_fingerprint != hardware_fingerprint:
+                    device.hardware_fingerprint = hardware_fingerprint
+                    update_fields.append('hardware_fingerprint')
+                if mac_address and device.mac_address != mac_address:
+                    device.mac_address = mac_address
+                    update_fields.append('mac_address')
+                if ip_address and device.ip_address != ip_address:
+                    device.ip_address = ip_address
+                    update_fields.append('ip_address')
+
+                device.last_heartbeat = timezone.now()
+                update_fields.append('last_heartbeat')
+
+                if update_fields:
+                    device.save(update_fields=update_fields)
 
         frp_server_config = get_frp_config()
         frp_config = build_frp_config_for_device(device, frp_server_config)
@@ -495,6 +612,18 @@ class DeviceViewSet(viewsets.ModelViewSet):
         device.memory_usage = request.data.get('memory_usage', 0)
         device.disk_usage = request.data.get('disk_usage', 0)
         device.last_heartbeat = timezone.now()
+
+        heartbeat_ip = normalize_text(request.data.get('ip_address'))
+        if heartbeat_ip:
+            device.ip_address = heartbeat_ip
+
+        heartbeat_mac = normalize_mac_address(request.data.get('mac_address'))
+        if heartbeat_mac:
+            device.mac_address = heartbeat_mac
+
+        heartbeat_fingerprint = normalize_text(request.data.get('hardware_fingerprint'))
+        if heartbeat_fingerprint:
+            device.hardware_fingerprint = heartbeat_fingerprint
         
         # 更新容器和服务状态
         device.container_status = request.data.get('container_status', device.container_status)
@@ -2268,17 +2397,10 @@ systemctl enable docker > /dev/null 2>&1 || true
 systemctl start docker > /dev/null 2>&1 || true
 echo "  - Docker服务已启动"
 
-# 2. 创建目录并清理旧设备ID
+# 2. 创建目录
 echo "[2/4] 创建工作目录..."
 mkdir -p /opt/device-agent
-
-# 清理旧的设备ID，强制重新注册
-# 这样可以避免设备被删除后无法重新上线的问题
-if [ -f /etc/device-id ]; then
-    echo "  - 发现旧设备ID，清理中..."
-    rm -f /etc/device-id
-    echo "  - 设备将重新注册"
-fi
+echo "  - 保留现有设备ID（如存在）"
 
 # 3. 下载完整的Agent
 echo "[3/4] 下载Agent..."
