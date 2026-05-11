@@ -3,7 +3,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 
-from .models import Device, FrpServerConfig
+from .models import Device, FrpServerConfig, Project, ProjectConfig, ProjectDeployment
 from .views import build_device_id_from_fingerprint
 
 
@@ -257,3 +257,118 @@ class DeviceIdentityTests(APITestCase):
         content = response.content.decode('utf-8')
         self.assertIn('保留现有设备ID', content)
         self.assertNotIn('rm -f /etc/device-id', content)
+
+
+class ProjectManagementTests(APITestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(username='pm_tester', password='secret123')
+        self.project = Project.objects.create(
+            name='Project A',
+            version='v1.0.0',
+            local_image_name='newserver:latest',
+            container_name='middleware',
+        )
+        self.device_a = Device.objects.create(device_id='DEV-project-a', ip_address='10.0.0.21')
+        self.device_b = Device.objects.create(device_id='DEV-project-b', ip_address='10.0.0.22')
+
+    def test_project_deployment_list_requires_auth_without_device_filter(self):
+        ProjectDeployment.objects.create(
+            project=self.project,
+            device=self.device_a,
+            deployed_version='v1.0.0',
+            status='pending',
+        )
+
+        response = self.client.get('/api/project-deployments/')
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_agent_project_deployment_list_only_returns_pending_tasks_for_own_device(self):
+        ProjectConfig.objects.create(
+            project=self.project,
+            key='TOKEN',
+            value='secret-value',
+            is_secret=True,
+        )
+        pending = ProjectDeployment.objects.create(
+            project=self.project,
+            device=self.device_a,
+            deployed_version='v1.0.0',
+            status='pending',
+        )
+        ProjectDeployment.objects.create(
+            project=self.project,
+            device=self.device_a,
+            deployed_version='v0.9.0',
+            status='completed',
+        )
+        ProjectDeployment.objects.create(
+            project=self.project,
+            device=self.device_b,
+            deployed_version='v1.0.0',
+            status='pending',
+        )
+
+        response = self.client.get(
+            '/api/project-deployments/',
+            {'device_id': self.device_a.device_id},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(response.data['results'][0]['id'], pending.id)
+        self.assertEqual(
+            response.data['results'][0]['project_info']['configs'][0]['value'],
+            'secret-value',
+        )
+
+    def test_set_project_config_removes_deleted_items(self):
+        self.client.force_authenticate(user=self.user)
+        ProjectConfig.objects.create(project=self.project, key='A', value='1')
+        ProjectConfig.objects.create(project=self.project, key='B', value='2')
+
+        response = self.client.post(
+            f'/api/projects/{self.project.id}/set_config/',
+            {
+                'configs': [
+                    {'key': 'A', 'value': 'updated', 'description': 'kept'},
+                ]
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['deleted'], 1)
+        self.assertEqual(ProjectConfig.objects.filter(project=self.project).count(), 1)
+        self.assertTrue(ProjectConfig.objects.filter(project=self.project, key='A', value='updated').exists())
+        self.assertFalse(ProjectConfig.objects.filter(project=self.project, key='B').exists())
+
+    def test_project_detail_counts_distinct_non_failed_deployments(self):
+        self.client.force_authenticate(user=self.user)
+        self.device_b.auto_deploy_project = self.project
+        self.device_b.save(update_fields=['auto_deploy_project'])
+
+        ProjectDeployment.objects.create(
+            project=self.project,
+            device=self.device_a,
+            deployed_version='v1.0.0',
+            status='completed',
+        )
+        ProjectDeployment.objects.create(
+            project=self.project,
+            device=self.device_a,
+            deployed_version='v1.0.1',
+            status='pending',
+        )
+        ProjectDeployment.objects.create(
+            project=self.project,
+            device=self.device_b,
+            deployed_version='v1.0.0',
+            status='failed',
+        )
+
+        response = self.client.get(f'/api/projects/{self.project.id}/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['deployed_devices_count'], 1)

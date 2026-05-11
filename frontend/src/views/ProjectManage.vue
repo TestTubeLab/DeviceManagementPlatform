@@ -2,7 +2,7 @@
   <div class="project-manage">
     <div class="page-header">
       <h2 class="page-title">项目管理</h2>
-      <el-button type="primary" :icon="Plus" @click="showCreateDialog = true">
+      <el-button type="primary" :icon="Plus" @click="openCreateDialog">
         创建项目
       </el-button>
     </div>
@@ -54,6 +54,7 @@
       v-model="showCreateDialog"
       :title="editingProject ? '编辑项目' : '创建项目'"
       width="800px"
+      @closed="handleProjectDialogClosed"
     >
       <el-form :model="projectForm" label-width="120px">
         <el-form-item label="项目名称" required>
@@ -473,6 +474,7 @@ const editingProject = ref<Project | null>(null)
 const deployingProject = ref<Project | null>(null)
 const viewingProject = ref<Project | null>(null)
 const configuringProject = ref<Project | null>(null)
+const preservedContainerConfig = ref<Record<string, any>>({})
 
 const selectedDevices = ref<string[]>([])
 const configList = ref<ProjectConfig[]>([])
@@ -503,6 +505,10 @@ const formatTime = (time: string) => {
   return dayjs(time).format('YYYY-MM-DD HH:mm:ss')
 }
 
+const cloneConfig = (value: Record<string, any> | null | undefined) => {
+  return JSON.parse(JSON.stringify(value || {}))
+}
+
 const resetProjectForm = () => {
   projectForm.value = {
     name: '',
@@ -525,22 +531,37 @@ const resetProjectForm = () => {
       restart_policy: 'unless-stopped'
     }
   }
+  preservedContainerConfig.value = {}
 }
 
 // 转换前端表单到后端格式
 const prepareProjectData = () => {
   const formData = { ...projectForm.value }
   const config = formData.container_config as Record<string, any>
+  const preservedConfig = cloneConfig(preservedContainerConfig.value)
   
   // 转换容器配置格式
   formData.container_config = {
+    ...preservedConfig,
     runtime: config.runtime_nvidia ? 'nvidia' : '',
     network_mode: config.network_mode || '',
     privileged: config.privileged || false,
     restart_policy: config.restart_policy || 'unless-stopped'
   }
+  delete (formData.container_config as Record<string, any>).runtime_nvidia
   
   return formData
+}
+
+const openCreateDialog = () => {
+  editingProject.value = null
+  resetProjectForm()
+  showCreateDialog.value = true
+}
+
+const handleProjectDialogClosed = () => {
+  editingProject.value = null
+  resetProjectForm()
 }
 
 const loadProjects = async () => {
@@ -630,7 +651,8 @@ const handleUploadCodePackage = async () => {
 
 const editProject = (project: Project) => {
   editingProject.value = project
-  const config = project.container_config || {}
+  const config = cloneConfig(project.container_config || {})
+  preservedContainerConfig.value = config
   projectForm.value = {
     name: project.name,
     description: project.description,

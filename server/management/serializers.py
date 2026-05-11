@@ -187,7 +187,14 @@ class ProjectSerializer(serializers.ModelSerializer):
     
     def get_deployed_devices_count(self, obj):
         """获取已部署设备数量"""
-        return Device.objects.filter(auto_deploy_project=obj).count()
+        return (
+            ProjectDeployment.objects
+            .filter(project=obj, task_type='deploy')
+            .exclude(status='failed')
+            .values('device_id')
+            .distinct()
+            .count()
+        )
 
 
 class ProjectDeploymentSerializer(serializers.ModelSerializer):

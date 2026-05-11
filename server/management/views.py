@@ -2622,33 +2622,41 @@ class ProjectViewSet(viewsets.ModelViewSet):
         
         created_count = 0
         updated_count = 0
-        
-        for config_data in configs:
-            key = config_data.get('key')
-            value = config_data.get('value')
-            
-            if not key:
-                continue
-            
-            config, created = ProjectConfig.objects.update_or_create(
-                project=project,
-                key=key,
-                defaults={
-                    'value': value,
-                    'description': config_data.get('description', ''),
-                    'is_secret': config_data.get('is_secret', False)
-                }
-            )
-            
-            if created:
-                created_count += 1
-            else:
-                updated_count += 1
+        submitted_keys = set()
+
+        with transaction.atomic():
+            for config_data in configs:
+                key = normalize_text(config_data.get('key'))
+                value = config_data.get('value')
+                
+                if not key:
+                    continue
+
+                submitted_keys.add(key)
+                
+                _, created = ProjectConfig.objects.update_or_create(
+                    project=project,
+                    key=key,
+                    defaults={
+                        'value': value,
+                        'description': config_data.get('description', ''),
+                        'is_secret': config_data.get('is_secret', False)
+                    }
+                )
+                
+                if created:
+                    created_count += 1
+                else:
+                    updated_count += 1
+
+            stale_configs = project.configs.exclude(key__in=submitted_keys) if submitted_keys else project.configs.all()
+            deleted_count, _ = stale_configs.delete()
         
         return Response({
             "message": "配置已更新",
             "created": created_count,
-            "updated": updated_count
+            "updated": updated_count,
+            "deleted": deleted_count,
         })
 
 
@@ -2656,12 +2664,17 @@ class ProjectDeploymentViewSet(viewsets.ModelViewSet):
     """项目部署管理API"""
     queryset = ProjectDeployment.objects.all()
     serializer_class = ProjectDeploymentSerializer
+
+    def _is_agent_list_request(self):
+        return self.action == 'list' and bool(normalize_text(self.request.query_params.get('device_id')))
     
     def get_permissions(self):
         """Agent调用的接口不需要认证"""
-        if self.action in ['list', 'retrieve', 'update_progress']:
+        if self.action == 'update_progress':
             return [AllowAny()]
-        return super().get_permissions()
+        if self._is_agent_list_request():
+            return [AllowAny()]
+        return [IsAuthenticated()]
     
     def get_queryset(self):
         """支持按设备和项目过滤"""
@@ -2669,6 +2682,12 @@ class ProjectDeploymentViewSet(viewsets.ModelViewSet):
         device_id = self.request.query_params.get('device_id')
         project_id = self.request.query_params.get('project_id')
         status = self.request.query_params.get('status')
+
+        if self.action == 'list' and not self.request.user.is_authenticated:
+            device_id = normalize_text(device_id)
+            if not device_id:
+                return queryset.none()
+            return queryset.filter(device__device_id=device_id, status='pending')
         
         if device_id:
             queryset = queryset.filter(device__device_id=device_id)

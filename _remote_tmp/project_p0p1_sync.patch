@@ -1,0 +1,344 @@
+diff --git a/frontend/src/views/ProjectManage.vue b/frontend/src/views/ProjectManage.vue
+index 62ad861..866cfb4 100644
+--- a/frontend/src/views/ProjectManage.vue
++++ b/frontend/src/views/ProjectManage.vue
+@@ -2,7 +2,7 @@
+   <div class="project-manage">
+     <div class="page-header">
+       <h2 class="page-title">项目管理</h2>
+-      <el-button type="primary" :icon="Plus" @click="showCreateDialog = true">
++      <el-button type="primary" :icon="Plus" @click="openCreateDialog">
+         创建项目
+       </el-button>
+     </div>
+@@ -54,6 +54,7 @@
+       v-model="showCreateDialog"
+       :title="editingProject ? '编辑项目' : '创建项目'"
+       width="800px"
++      @closed="handleProjectDialogClosed"
+     >
+       <el-form :model="projectForm" label-width="120px">
+         <el-form-item label="项目名称" required>
+@@ -473,6 +474,7 @@ const editingProject = ref<Project | null>(null)
+ const deployingProject = ref<Project | null>(null)
+ const viewingProject = ref<Project | null>(null)
+ const configuringProject = ref<Project | null>(null)
++const preservedContainerConfig = ref<Record<string, any>>({})
+ 
+ const selectedDevices = ref<string[]>([])
+ const configList = ref<ProjectConfig[]>([])
+@@ -503,6 +505,10 @@ const formatTime = (time: string) => {
+   return dayjs(time).format('YYYY-MM-DD HH:mm:ss')
+ }
+ 
++const cloneConfig = (value: Record<string, any> | null | undefined) => {
++  return JSON.parse(JSON.stringify(value || {}))
++}
++
+ const resetProjectForm = () => {
+   projectForm.value = {
+     name: '',
+@@ -525,24 +531,39 @@ const resetProjectForm = () => {
+       restart_policy: 'unless-stopped'
+     }
+   }
++  preservedContainerConfig.value = {}
+ }
+ 
+ // 转换前端表单到后端格式
+ const prepareProjectData = () => {
+   const formData = { ...projectForm.value }
+   const config = formData.container_config as Record<string, any>
++  const preservedConfig = cloneConfig(preservedContainerConfig.value)
+   
+   // 转换容器配置格式
+   formData.container_config = {
++    ...preservedConfig,
+     runtime: config.runtime_nvidia ? 'nvidia' : '',
+     network_mode: config.network_mode || '',
+     privileged: config.privileged || false,
+     restart_policy: config.restart_policy || 'unless-stopped'
+   }
++  delete (formData.container_config as Record<string, any>).runtime_nvidia
+   
+   return formData
+ }
+ 
++const openCreateDialog = () => {
++  editingProject.value = null
++  resetProjectForm()
++  showCreateDialog.value = true
++}
++
++const handleProjectDialogClosed = () => {
++  editingProject.value = null
++  resetProjectForm()
++}
++
+ const loadProjects = async () => {
+   loading.value = true
+   try {
+@@ -630,7 +651,8 @@ const handleUploadCodePackage = async () => {
+ 
+ const editProject = (project: Project) => {
+   editingProject.value = project
+-  const config = project.container_config || {}
++  const config = cloneConfig(project.container_config || {})
++  preservedContainerConfig.value = config
+   projectForm.value = {
+     name: project.name,
+     description: project.description,
+diff --git a/server/management/serializers.py b/server/management/serializers.py
+index 81b65da..68b7896 100644
+--- a/server/management/serializers.py
++++ b/server/management/serializers.py
+@@ -187,7 +187,14 @@ class ProjectSerializer(serializers.ModelSerializer):
+     
+     def get_deployed_devices_count(self, obj):
+         """获取已部署设备数量"""
+-        return Device.objects.filter(auto_deploy_project=obj).count()
++        return (
++            ProjectDeployment.objects
++            .filter(project=obj, task_type='deploy')
++            .exclude(status='failed')
++            .values('device_id')
++            .distinct()
++            .count()
++        )
+ 
+ 
+ class ProjectDeploymentSerializer(serializers.ModelSerializer):
+diff --git a/server/management/tests.py b/server/management/tests.py
+index 41aa1a6..bfe650c 100644
+--- a/server/management/tests.py
++++ b/server/management/tests.py
+@@ -3,7 +3,7 @@ from unittest.mock import patch
+ from django.contrib.auth import get_user_model
+ from rest_framework.test import APITestCase
+ 
+-from .models import Device, FrpServerConfig
++from .models import Device, FrpServerConfig, Project, ProjectConfig, ProjectDeployment
+ from .views import build_device_id_from_fingerprint
+ 
+ 
+@@ -257,3 +257,118 @@ class DeviceIdentityTests(APITestCase):
+         content = response.content.decode('utf-8')
+         self.assertIn('保留现有设备ID', content)
+         self.assertNotIn('rm -f /etc/device-id', content)
++
++
++class ProjectManagementTests(APITestCase):
++    def setUp(self):
++        user_model = get_user_model()
++        self.user = user_model.objects.create_user(username='pm_tester', password='secret123')
++        self.project = Project.objects.create(
++            name='Project A',
++            version='v1.0.0',
++            local_image_name='newserver:latest',
++            container_name='middleware',
++        )
++        self.device_a = Device.objects.create(device_id='DEV-project-a', ip_address='10.0.0.21')
++        self.device_b = Device.objects.create(device_id='DEV-project-b', ip_address='10.0.0.22')
++
++    def test_project_deployment_list_requires_auth_without_device_filter(self):
++        ProjectDeployment.objects.create(
++            project=self.project,
++            device=self.device_a,
++            deployed_version='v1.0.0',
++            status='pending',
++        )
++
++        response = self.client.get('/api/project-deployments/')
++
++        self.assertEqual(response.status_code, 401)
++
++    def test_agent_project_deployment_list_only_returns_pending_tasks_for_own_device(self):
++        ProjectConfig.objects.create(
++            project=self.project,
++            key='TOKEN',
++            value='secret-value',
++            is_secret=True,
++        )
++        pending = ProjectDeployment.objects.create(
++            project=self.project,
++            device=self.device_a,
++            deployed_version='v1.0.0',
++            status='pending',
++        )
++        ProjectDeployment.objects.create(
++            project=self.project,
++            device=self.device_a,
++            deployed_version='v0.9.0',
++            status='completed',
++        )
++        ProjectDeployment.objects.create(
++            project=self.project,
++            device=self.device_b,
++            deployed_version='v1.0.0',
++            status='pending',
++        )
++
++        response = self.client.get(
++            '/api/project-deployments/',
++            {'device_id': self.device_a.device_id},
++        )
++
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.data['count'], 1)
++        self.assertEqual(response.data['results'][0]['id'], pending.id)
++        self.assertEqual(
++            response.data['results'][0]['project_info']['configs'][0]['value'],
++            'secret-value',
++        )
++
++    def test_set_project_config_removes_deleted_items(self):
++        self.client.force_authenticate(user=self.user)
++        ProjectConfig.objects.create(project=self.project, key='A', value='1')
++        ProjectConfig.objects.create(project=self.project, key='B', value='2')
++
++        response = self.client.post(
++            f'/api/projects/{self.project.id}/set_config/',
++            {
++                'configs': [
++                    {'key': 'A', 'value': 'updated', 'description': 'kept'},
++                ]
++            },
++            format='json',
++        )
++
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.data['deleted'], 1)
++        self.assertEqual(ProjectConfig.objects.filter(project=self.project).count(), 1)
++        self.assertTrue(ProjectConfig.objects.filter(project=self.project, key='A', value='updated').exists())
++        self.assertFalse(ProjectConfig.objects.filter(project=self.project, key='B').exists())
++
++    def test_project_detail_counts_distinct_non_failed_deployments(self):
++        self.client.force_authenticate(user=self.user)
++        self.device_b.auto_deploy_project = self.project
++        self.device_b.save(update_fields=['auto_deploy_project'])
++
++        ProjectDeployment.objects.create(
++            project=self.project,
++            device=self.device_a,
++            deployed_version='v1.0.0',
++            status='completed',
++        )
++        ProjectDeployment.objects.create(
++            project=self.project,
++            device=self.device_a,
++            deployed_version='v1.0.1',
++            status='pending',
++        )
++        ProjectDeployment.objects.create(
++            project=self.project,
++            device=self.device_b,
++            deployed_version='v1.0.0',
++            status='failed',
++        )
++
++        response = self.client.get(f'/api/projects/{self.project.id}/')
++
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.data['deployed_devices_count'], 1)
+diff --git a/server/management/views.py b/server/management/views.py
+index 407f970..ae703a6 100644
+--- a/server/management/views.py
++++ b/server/management/views.py
+@@ -2622,33 +2622,41 @@ class ProjectViewSet(viewsets.ModelViewSet):
+         
+         created_count = 0
+         updated_count = 0
+-        
+-        for config_data in configs:
+-            key = config_data.get('key')
+-            value = config_data.get('value')
+-            
+-            if not key:
+-                continue
+-            
+-            config, created = ProjectConfig.objects.update_or_create(
+-                project=project,
+-                key=key,
+-                defaults={
+-                    'value': value,
+-                    'description': config_data.get('description', ''),
+-                    'is_secret': config_data.get('is_secret', False)
+-                }
+-            )
+-            
+-            if created:
+-                created_count += 1
+-            else:
+-                updated_count += 1
++        submitted_keys = set()
++
++        with transaction.atomic():
++            for config_data in configs:
++                key = normalize_text(config_data.get('key'))
++                value = config_data.get('value')
++                
++                if not key:
++                    continue
++
++                submitted_keys.add(key)
++                
++                _, created = ProjectConfig.objects.update_or_create(
++                    project=project,
++                    key=key,
++                    defaults={
++                        'value': value,
++                        'description': config_data.get('description', ''),
++                        'is_secret': config_data.get('is_secret', False)
++                    }
++                )
++                
++                if created:
++                    created_count += 1
++                else:
++                    updated_count += 1
++
++            stale_configs = project.configs.exclude(key__in=submitted_keys) if submitted_keys else project.configs.all()
++            deleted_count, _ = stale_configs.delete()
+         
+         return Response({
+             "message": "配置已更新",
+             "created": created_count,
+-            "updated": updated_count
++            "updated": updated_count,
++            "deleted": deleted_count,
+         })
+ 
+ 
+@@ -2656,12 +2664,17 @@ class ProjectDeploymentViewSet(viewsets.ModelViewSet):
+     """项目部署管理API"""
+     queryset = ProjectDeployment.objects.all()
+     serializer_class = ProjectDeploymentSerializer
++
++    def _is_agent_list_request(self):
++        return self.action == 'list' and bool(normalize_text(self.request.query_params.get('device_id')))
+     
+     def get_permissions(self):
+         """Agent调用的接口不需要认证"""
+-        if self.action in ['list', 'retrieve', 'update_progress']:
++        if self.action == 'update_progress':
+             return [AllowAny()]
+-        return super().get_permissions()
++        if self._is_agent_list_request():
++            return [AllowAny()]
++        return [IsAuthenticated()]
+     
+     def get_queryset(self):
+         """支持按设备和项目过滤"""
+@@ -2669,6 +2682,12 @@ class ProjectDeploymentViewSet(viewsets.ModelViewSet):
+         device_id = self.request.query_params.get('device_id')
+         project_id = self.request.query_params.get('project_id')
+         status = self.request.query_params.get('status')
++
++        if self.action == 'list' and not self.request.user.is_authenticated:
++            device_id = normalize_text(device_id)
++            if not device_id:
++                return queryset.none()
++            return queryset.filter(device__device_id=device_id, status='pending')
+         
+         if device_id:
+             queryset = queryset.filter(device__device_id=device_id)
