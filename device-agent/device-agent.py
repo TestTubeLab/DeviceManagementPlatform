@@ -32,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.7.1"  # Agent 版本号，每次更新递增（修复设备身份识别和心跳 IP 刷新）
+AGENT_VERSION = "1.7.2"  # Agent 版本号，每次更新递增（修复 PLC 配置写入 socket.yml）
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
@@ -1785,6 +1785,7 @@ def apply_middleware_config(config_id, config_data):
         
         files_to_backup = [
             f"{code_path}/config/devices.yml",
+            f"{code_path}/config/socket.yml",
             f"{code_path}/server/server/settings.py",
             f"{code_path}/frontend/vite.config.ts"
         ]
@@ -1802,9 +1803,9 @@ def apply_middleware_config(config_id, config_data):
         logger.info("  生成 devices.yml...")
         generate_devices_yml(f"{code_path}/config/devices.yml", config_data['cameras'])
         
-        # 2.2 修改 settings.py 中的 SOCKET_CONFIG
-        logger.info("  修改 settings.py...")
-        patch_settings_py(f"{code_path}/server/server/settings.py", config_data['plc'])
+        # 2.2 修改 PLC Socket 配置
+        logger.info("  修改 socket 配置...")
+        patch_plc_config(code_path, config_data['plc'])
         
         # 2.3 修改 vite.config.ts 中的 proxy target
         logger.info("  修改 vite.config.ts...")
@@ -1932,6 +1933,9 @@ def patch_settings_py(file_path, plc_config):
     
     # 正则替换 SOCKET_CONFIG (匹配多行)
     pattern = r'SOCKET_CONFIG\s*=\s*\{[^}]*"reverse"[^}]*\}[^}]*\}'
+    if not re.search(pattern, content, flags=re.DOTALL):
+        logger.info(f"settings.py 未发现旧版 SOCKET_CONFIG 结构，跳过: {file_path}")
+        return False
     content = re.sub(pattern, new_socket_config, content, flags=re.DOTALL)
     
     # 写入文件
@@ -1939,6 +1943,49 @@ def patch_settings_py(file_path, plc_config):
         f.write(content)
     
     logger.info(f"settings.py 已修改: {file_path}")
+    return True
+
+def patch_socket_yml(file_path, plc_config):
+    """修改 config/socket.yml 中的 reverse 配置"""
+    import yaml
+
+    config = {}
+    if os.path.exists(file_path):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+        if not isinstance(config, dict):
+            raise ValueError(f"socket.yml 格式无效: {file_path}")
+
+    reverse_config = config.get('reverse')
+    if reverse_config is None or not isinstance(reverse_config, dict):
+        reverse_config = {}
+        config['reverse'] = reverse_config
+
+    reverse_config['HOST'] = str(plc_config["host"])
+    reverse_config['PORT'] = int(plc_config["port"])
+
+    with open(file_path, 'w', encoding='utf-8', newline='\n') as f:
+        yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+
+    logger.info(f"socket.yml 已修改: {file_path}")
+    return True
+
+def patch_plc_config(code_path, plc_config):
+    """优先修改新版 socket.yml，兼容旧版 settings.py"""
+    socket_yml_path = f"{code_path}/config/socket.yml"
+    settings_path = f"{code_path}/server/server/settings.py"
+
+    updated = False
+
+    if os.path.exists(socket_yml_path):
+        patch_socket_yml(socket_yml_path, plc_config)
+        updated = True
+
+    if os.path.exists(settings_path):
+        updated = patch_settings_py(settings_path, plc_config) or updated
+
+    if not updated:
+        raise FileNotFoundError("未找到可更新的 PLC Socket 配置文件")
 
 def patch_vite_config(file_path, backend_config):
     """修改vite.config.ts中的proxy target - 使用安全的方式"""
@@ -1969,6 +2016,7 @@ def rollback_config(backup_path, code_path):
     
     files_to_restore = [
         ("devices.yml", f"{code_path}/config/devices.yml"),
+        ("socket.yml", f"{code_path}/config/socket.yml"),
         ("settings.py", f"{code_path}/server/server/settings.py"),
         ("vite.config.ts", f"{code_path}/frontend/vite.config.ts")
     ]

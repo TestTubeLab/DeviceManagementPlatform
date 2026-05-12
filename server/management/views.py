@@ -31,7 +31,7 @@ from .serializers import (
 )
 
 # Agent 最新版本号（每次更新 Agent 时需要同步修改）
-AGENT_VERSION = "1.7.1"  # 修复设备身份识别和心跳 IP 刷新
+AGENT_VERSION = "1.7.2"  # 修复 PLC 配置写入 socket.yml
 
 
 def normalize_text(value):
