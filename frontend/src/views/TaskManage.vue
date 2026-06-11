@@ -113,7 +113,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { getProjectDeployments, type ProjectDeployment } from '@/api/project'
 import {
@@ -161,11 +161,17 @@ const viewDetail = (deployment: ProjectDeployment) => {
   showDetailDialog.value = true
 }
 
+let refreshTimer: number
+
 onMounted(() => {
   loadDeployments()
   
   // 定时刷新（30秒）
-  setInterval(loadDeployments, 30000)
+  refreshTimer = setInterval(loadDeployments, 30000)
+})
+
+onUnmounted(() => {
+  clearInterval(refreshTimer)
 })
 </script>
 

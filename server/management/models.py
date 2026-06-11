@@ -476,6 +476,11 @@ class FrpServerConfig(models.Model):
     port_pool_start = models.IntegerField(help_text="端口池起始")
     port_pool_end = models.IntegerField(help_text="端口池结束")
 
+    # Web 端口池配置（独立于 SSH 端口池，用于穿透设备本机 Web 服务，如 8088）
+    # 留空（None）表示未启用 Web 穿透，保持仅 SSH 的原有行为
+    web_port_pool_start = models.IntegerField(null=True, blank=True, help_text="Web端口池起始（留空表示不启用）")
+    web_port_pool_end = models.IntegerField(null=True, blank=True, help_text="Web端口池结束（留空表示不启用）")
+
     # 状态
     is_active = models.BooleanField(default=True)
     config_version = models.IntegerField(default=1, help_text="配置版本号")
@@ -491,6 +496,16 @@ class FrpServerConfig(models.Model):
 
     def __str__(self):
         return f"{self.server_addr}:{self.server_port}"
+
+    @property
+    def web_pool_enabled(self):
+        """是否启用了 Web 端口池（两端都已配置且为正数）。"""
+        return bool(
+            self.web_port_pool_start
+            and self.web_port_pool_end
+            and self.web_port_pool_start > 0
+            and self.web_port_pool_end > 0
+        )
 
     @property
     def available_ports(self):

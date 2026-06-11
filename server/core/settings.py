@@ -199,11 +199,12 @@ FRP_CONFIG = {
             'start': int(os.getenv('FRP_SSH_PORT_START', '39983')),
             'end': int(os.getenv('FRP_SSH_PORT_END', '39993')),
         },
-        # 预留 Web 端口池，当前不启用
-        # 'web': {
-        #     'start': int(os.getenv('FRP_WEB_PORT_START', '39994')),
-        #     'end': int(os.getenv('FRP_WEB_PORT_END', '39999')),
-        # },
+        # Web 端口池：用于穿透设备本机 Web 服务（如 MiddlewareServer 的 8088）
+        # 默认留空（不设置环境变量即不启用），保持仅 SSH 的原有行为
+        'web': {
+            'start': int(os.getenv('FRP_WEB_PORT_START')) if os.getenv('FRP_WEB_PORT_START') else None,
+            'end': int(os.getenv('FRP_WEB_PORT_END')) if os.getenv('FRP_WEB_PORT_END') else None,
+        },
     },
     
     # 配置版本号（每次修改递增，Agent 据此判断是否需要更新）

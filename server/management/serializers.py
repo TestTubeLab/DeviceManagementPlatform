@@ -55,13 +55,15 @@ class FrpDeviceSerializer(serializers.ModelSerializer):
     computed_status = serializers.SerializerMethodField()
     agent_version = serializers.SerializerMethodField()
     ssh_connection_string = serializers.SerializerMethodField()
+    web_access_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Device
         fields = [
             'id', 'device_id', 'name', 'ip_address',
             'status', 'computed_status', 'last_heartbeat', 'agent_version',
-            'frp_enabled', 'frp_ssh_port', 'frp_status', 'ssh_connection_string',
+            'frp_enabled', 'frp_ssh_port', 'frp_web_port', 'frp_status',
+            'ssh_connection_string', 'web_access_url',
         ]
 
     def get_computed_status(self, obj):
@@ -74,6 +76,9 @@ class FrpDeviceSerializer(serializers.ModelSerializer):
 
     def get_ssh_connection_string(self, obj):
         return obj.ssh_connection_string
+
+    def get_web_access_url(self, obj):
+        return obj.web_access_url
 
 
 class DeploymentTaskSerializer(serializers.ModelSerializer):
@@ -314,12 +319,14 @@ class FrpServerConfigSerializer(serializers.ModelSerializer):
         model = FrpServerConfig
         fields = [
             'id', 'server_addr', 'server_port', 'token',
-            'port_pool_start', 'port_pool_end', 'is_active', 'config_version',
+            'port_pool_start', 'port_pool_end',
+            'web_port_pool_start', 'web_port_pool_end', 'web_pool_enabled',
+            'is_active', 'config_version',
             'description', 'created_at', 'updated_at', 'available_ports',
             'total_ports', 'used_ports_count', 'available_ports_count',
             'enabled_devices_count', 'connected_devices_count'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'config_version']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'config_version', 'web_pool_enabled']
 
     def get_available_ports(self, obj):
         """获取可用端口列表"""

@@ -206,6 +206,24 @@
               </el-button>
             </div>
           </el-descriptions-item>
+          <el-descriptions-item v-if="device.frp_web_port" label="Web 端口">
+            <span style="font-family: monospace; font-weight: 600; color: #409EFF">{{ device.frp_web_port }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item v-if="device.web_access_url" label="Web 访问">
+            <div style="display: flex; align-items: center; gap: 8px">
+              <a
+                :href="device.web_access_url"
+                target="_blank"
+                rel="noopener noreferrer"
+                style="font-family: monospace; background: #f5f7fa; padding: 4px 8px; border-radius: 4px; color: #409EFF"
+              >
+                {{ device.web_access_url }}
+              </a>
+              <el-button type="primary" link size="small" @click="copyWebUrl">
+                复制
+              </el-button>
+            </div>
+          </el-descriptions-item>
         </el-descriptions>
         <el-alert
           v-if="deviceFrpStatus !== 'connected'"
@@ -923,6 +941,18 @@ const copySshCommand = () => {
     })
 }
 
+const copyWebUrl = () => {
+  const url = device.value?.web_access_url
+  if (!url) return
+  copyToClipboard(url)
+    .then(() => {
+      ElMessage.success('Web 访问地址已复制到剪贴板')
+    })
+    .catch(() => {
+      ElMessage.error('复制失败，请手动复制')
+    })
+}
+
 const handleAllocateFrpPort = async () => {
   if (!device.value) return
   
@@ -1447,9 +1477,24 @@ const pollTaskResult = async (taskId: number, timeout: number = 10000): Promise<
 
 // 高亮关键词
 const highlightKeyword = (text: string) => {
-  if (!logSearchKeyword.value) return text
-  const regex = new RegExp(`(${logSearchKeyword.value})`, 'gi')
-  return text.replace(regex, '<mark>$1</mark>')
+  // 先转义 HTML，避免日志内容中的标签被 v-html 当作 HTML 执行（XSS）
+  const escapeHtml = (value: string) =>
+    value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+
+  const escaped = escapeHtml(text)
+  if (!logSearchKeyword.value) return escaped
+
+  // 转义正则特殊字符，避免关键字含 ( [ 等导致 RegExp 抛错
+  const safeKeyword = escapeHtml(logSearchKeyword.value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  if (!safeKeyword) return escaped
+
+  const regex = new RegExp(`(${safeKeyword})`, 'gi')
+  return escaped.replace(regex, '<mark>$1</mark>')
 }
 
 // 监听对话框打开

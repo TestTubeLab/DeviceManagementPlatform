@@ -37,7 +37,14 @@
           <div class="summary-value monospace">
             {{ configForm.port_pool_start || '-' }} - {{ configForm.port_pool_end || '-' }}
           </div>
-          <div class="summary-help">已用 {{ overview?.config.used_ports_count ?? 0 }} / {{ overview?.config.total_ports ?? 0 }}</div>
+          <div class="summary-help">
+            <template v-if="overview?.config.web_pool_enabled">
+              Web {{ configForm.web_port_pool_start }} - {{ configForm.web_port_pool_end }}
+            </template>
+            <template v-else>
+              已用 {{ overview?.config.used_ports_count ?? 0 }} / {{ overview?.config.total_ports ?? 0 }}
+            </template>
+          </div>
         </el-card>
       </el-col>
       <el-col :xs="24" :sm="12" :lg="6">
@@ -95,6 +102,36 @@
                 </el-form-item>
               </el-col>
             </el-row>
+
+            <el-row :gutter="20">
+              <el-col :xs="24" :md="12">
+                <el-form-item label="Web起始端口">
+                  <el-input-number
+                    v-model="configForm.web_port_pool_start"
+                    :min="1"
+                    :max="65535"
+                    controls-position="right"
+                    placeholder="留空不启用"
+                    style="width: 100%"
+                  />
+                </el-form-item>
+              </el-col>
+              <el-col :xs="24" :md="12">
+                <el-form-item label="Web结束端口">
+                  <el-input-number
+                    v-model="configForm.web_port_pool_end"
+                    :min="1"
+                    :max="65535"
+                    controls-position="right"
+                    placeholder="留空不启用"
+                    style="width: 100%"
+                  />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item>
+              <span class="form-hint">Web 端口池用于穿透设备本机 8088 端口（MiddlewareServer Web）。两端均留空表示不启用，仅保留 SSH 穿透。</span>
+            </el-form-item>
 
             <el-row :gutter="20">
               <el-col :xs="24" :md="12">
@@ -195,6 +232,11 @@
             <span class="monospace">{{ row.frp_ssh_port ?? '-' }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="Web端口" min-width="120">
+          <template #default="{ row }">
+            <span class="monospace">{{ row.frp_web_port ?? '-' }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="隧道状态" min-width="120">
           <template #default="{ row }">
             <el-tag :type="getFrpTagType(row.frp_status)">
@@ -207,6 +249,15 @@
             <div v-if="row.ssh_connection_string" class="ssh-cell">
               <code class="ssh-code">{{ row.ssh_connection_string }}</code>
               <el-button type="primary" link @click="copyText(row.ssh_connection_string)">复制</el-button>
+            </div>
+            <span v-else class="text-muted">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="Web访问" min-width="240">
+          <template #default="{ row }">
+            <div v-if="row.web_access_url" class="ssh-cell">
+              <code class="ssh-code">{{ row.web_access_url }}</code>
+              <el-button type="primary" link @click="copyText(row.web_access_url)">复制</el-button>
             </div>
             <span v-else class="text-muted">-</span>
           </template>
@@ -246,6 +297,8 @@ const configForm = ref({
   token: '',
   port_pool_start: 0,
   port_pool_end: 0,
+  web_port_pool_start: null as number | null,
+  web_port_pool_end: null as number | null,
   is_active: true,
   description: '',
 })
@@ -272,6 +325,8 @@ const applyOverview = (data: FrpOverview) => {
     token: data.config.token,
     port_pool_start: data.config.port_pool_start,
     port_pool_end: data.config.port_pool_end,
+    web_port_pool_start: data.config.web_port_pool_start,
+    web_port_pool_end: data.config.web_port_pool_end,
     is_active: data.config.is_active,
     description: data.config.description || '',
   }
@@ -530,6 +585,12 @@ onMounted(() => {
 .text-muted {
   color: #909399;
   font-size: 12px;
+}
+
+.form-hint {
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .ssh-cell {

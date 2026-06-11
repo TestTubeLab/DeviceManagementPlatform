@@ -54,6 +54,7 @@ export interface Device {
   frp_last_check?: string | null
   frp_error_message?: string
   ssh_connection_string?: string | null
+  web_access_url?: string | null
 }
 
 export interface FrpConfig {
@@ -63,6 +64,9 @@ export interface FrpConfig {
   token: string
   port_pool_start: number
   port_pool_end: number
+  web_port_pool_start: number | null
+  web_port_pool_end: number | null
+  web_pool_enabled: boolean
   is_active: boolean
   config_version: number
   description: string

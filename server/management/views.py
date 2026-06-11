@@ -134,12 +134,16 @@ def get_default_frp_config():
     """从 settings 读取默认 FRP 配置，用于首次引导数据库记录。"""
     frp_cfg = getattr(settings, 'FRP_CONFIG', {})
     ssh_pool = frp_cfg.get('port_pools', {}).get('ssh', {})
+    web_pool = frp_cfg.get('port_pools', {}).get('web', {})
     return {
         'server_addr': frp_cfg.get('server_addr', '127.0.0.1'),
         'server_port': frp_cfg.get('server_port', 7000),
         'token': frp_cfg.get('token', ''),
         'port_pool_start': ssh_pool.get('start', 6000),
         'port_pool_end': ssh_pool.get('end', 6999),
+        # Web 端口池默认留空（None），未配置环境变量即不启用 Web 穿透
+        'web_port_pool_start': web_pool.get('start'),
+        'web_port_pool_end': web_pool.get('end'),
         'is_active': frp_cfg.get('enabled', True),
         'config_version': frp_cfg.get('config_version', 1),
         'description': '从 settings.FRP_CONFIG 自动初始化',
@@ -179,12 +183,37 @@ def validate_frp_range(start_port, end_port):
         raise ValidationError({'port_pool_start': '端口必须位于 1-65535 范围内'})
 
 
+def validate_frp_web_pool(web_start, web_end, ssh_start, ssh_end):
+    """校验 Web 端口池：要么同时留空（不启用），要么成对配置且不与 SSH 池重叠。"""
+    if not web_start and not web_end:
+        return
+    if bool(web_start) != bool(web_end):
+        raise ValidationError({
+            'web_port_pool_start': 'Web 端口池起始与结束必须同时填写，或同时留空以表示不启用'
+        })
+
+    validate_frp_range(web_start, web_end)
+
+    if web_start <= ssh_end and ssh_start <= web_end:
+        raise ValidationError({
+            'web_port_pool_start': f'Web 端口池（{web_start}-{web_end}）不能与 SSH 端口池（{ssh_start}-{ssh_end}）重叠'
+        })
+
+
 def get_used_frp_ports(exclude_device=None):
     """获取已使用的 FRP SSH 端口。"""
     queryset = Device.objects.filter(frp_enabled=True).exclude(frp_ssh_port__isnull=True)
     if exclude_device is not None:
         queryset = queryset.exclude(pk=exclude_device.pk)
     return set(queryset.values_list('frp_ssh_port', flat=True))
+
+
+def get_used_frp_web_ports(exclude_device=None):
+    """获取已使用的 FRP Web 端口。"""
+    queryset = Device.objects.filter(frp_enabled=True).exclude(frp_web_port__isnull=True)
+    if exclude_device is not None:
+        queryset = queryset.exclude(pk=exclude_device.pk)
+    return set(queryset.values_list('frp_web_port', flat=True))
 
 
 def release_device_frp_ports(device, save=True):
@@ -252,6 +281,41 @@ def allocate_frp_ssh_port(device, frp_config=None):
     return None
 
 
+def allocate_frp_web_port(device, frp_config=None):
+    """
+    为设备分配 Web 端口（幂等操作）
+    - 仅在配置了 Web 端口池时生效，否则返回 None（保持仅 SSH 行为）
+    - 如果已分配且在当前 Web 端口池范围内，直接返回
+    - 否则从 Web 端口池中分配一个可用端口
+    """
+    if not device.frp_enabled:
+        return None
+
+    frp_config = frp_config or get_frp_config()
+
+    if not frp_config.web_pool_enabled:
+        return None
+
+    web_start = frp_config.web_port_pool_start
+    web_end = frp_config.web_port_pool_end
+
+    if device.frp_web_port and web_start <= device.frp_web_port <= web_end:
+        return device.frp_web_port
+
+    if not frp_config.is_active:
+        return None
+
+    used_ports = get_used_frp_web_ports(exclude_device=device)
+
+    for port in range(web_start, web_end + 1):
+        if port not in used_ports:
+            device.frp_web_port = port
+            device.save(update_fields=['frp_web_port'])
+            return port
+
+    return None
+
+
 def plan_frp_port_assignments(frp_config):
     """根据当前端口池为启用 FRP 的设备规划端口。"""
     validate_frp_range(frp_config.port_pool_start, frp_config.port_pool_end)
@@ -310,6 +374,17 @@ def apply_frp_port_assignments(frp_config, assignments=None):
             device.frp_error_message = ''
             update_fields.extend(['frp_ssh_port', 'frp_status', 'frp_error_message'])
 
+        # Web 端口对账：池未启用或已分配端口超出当前 Web 范围时清空，留待下次按需重新分配
+        if device.frp_web_port is not None:
+            web_in_range = (
+                frp_config.web_pool_enabled
+                and frp_config.web_port_pool_start <= device.frp_web_port <= frp_config.web_port_pool_end
+            )
+            if not web_in_range:
+                device.frp_web_port = None
+                if 'frp_web_port' not in update_fields:
+                    update_fields.append('frp_web_port')
+
         if update_fields:
             device.save(update_fields=update_fields)
 
@@ -328,18 +403,30 @@ def build_frp_config_for_device(device, frp_config=None):
     if not ssh_port:
         return None
 
+    tunnels = {
+        'ssh': {
+            'type': 'tcp',
+            'local_port': 22,
+            'remote_port': ssh_port,
+        }
+    }
+
+    # Web 隧道：仅在配置了 Web 端口池时下发，穿透设备本机 Web 服务（8088）
+    if frp_config.web_pool_enabled:
+        web_port = device.frp_web_port or allocate_frp_web_port(device, frp_config=frp_config)
+        if web_port:
+            tunnels['web'] = {
+                'type': 'tcp',
+                'local_port': 8088,
+                'remote_port': web_port,
+            }
+
     return {
         'server_addr': frp_config.server_addr,
         'server_port': frp_config.server_port,
         'token': frp_config.token,
         'config_version': frp_config.config_version,
-        'tunnels': {
-            'ssh': {
-                'type': 'tcp',
-                'local_port': 22,
-                'remote_port': ssh_port,
-            }
-        }
+        'tunnels': tunnels,
     }
 
 
@@ -417,11 +504,11 @@ def render_frps_ini(frp_config, existing_content=''):
 
     parser.set('common', 'bind_port', str(frp_config.server_port))
     parser.set('common', 'token', str(frp_config.token))
-    parser.set(
-        'common',
-        'allow_ports',
-        format_frp_allow_ports(frp_config.port_pool_start, frp_config.port_pool_end)
-    )
+    allow_ports = format_frp_allow_ports(frp_config.port_pool_start, frp_config.port_pool_end)
+    # 启用 Web 端口池时，把 Web 端口范围一并加入 frps 的 allow_ports
+    if frp_config.web_pool_enabled:
+        allow_ports = f"{allow_ports},{format_frp_allow_ports(frp_config.web_port_pool_start, frp_config.web_port_pool_end)}"
+    parser.set('common', 'allow_ports', allow_ports)
 
     if not parser.has_option('common', 'log_file'):
         parser.set('common', 'log_file', '/var/log/frps/frps.log')
@@ -1124,7 +1211,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 ipaddress.ip_address(ip)
             ipaddress.ip_address(config_data['plc']['host'])
             ipaddress.ip_address(config_data['backend']['host'])
-        except:
+        except Exception:
             return False
         
         return True
@@ -1190,7 +1277,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
                     created_at = timezone.datetime.fromisoformat(task['created_at'])
                     if created_at < seven_days_ago:
                         to_delete.append(tid)
-                except:
+                except Exception:
                     pass
         
         for tid in to_delete:
@@ -1658,10 +1745,19 @@ class FrpManagementViewSet(viewsets.ViewSet):
             'token': validated_data.get('token', frp_config.token),
             'port_pool_start': validated_data.get('port_pool_start', frp_config.port_pool_start),
             'port_pool_end': validated_data.get('port_pool_end', frp_config.port_pool_end),
+            'web_port_pool_start': validated_data.get('web_port_pool_start', frp_config.web_port_pool_start),
+            'web_port_pool_end': validated_data.get('web_port_pool_end', frp_config.web_port_pool_end),
             'is_active': validated_data.get('is_active', frp_config.is_active),
             'description': validated_data.get('description', frp_config.description),
         }
         validate_frp_range(candidate['port_pool_start'], candidate['port_pool_end'])
+        # Web 端口池：成对校验、范围校验，并确保不与 SSH 端口池重叠（留空表示不启用）
+        validate_frp_web_pool(
+            candidate['web_port_pool_start'],
+            candidate['web_port_pool_end'],
+            candidate['port_pool_start'],
+            candidate['port_pool_end'],
+        )
 
         old_config_state = {
             'server_addr': frp_config.server_addr,
@@ -1669,6 +1765,8 @@ class FrpManagementViewSet(viewsets.ViewSet):
             'token': frp_config.token,
             'port_pool_start': frp_config.port_pool_start,
             'port_pool_end': frp_config.port_pool_end,
+            'web_port_pool_start': frp_config.web_port_pool_start,
+            'web_port_pool_end': frp_config.web_port_pool_end,
             'is_active': frp_config.is_active,
             'config_version': frp_config.config_version,
             'description': frp_config.description,
@@ -1795,7 +1893,7 @@ def agent_download(request):
         agent_path = '/app/device-agent/device-agent.py'
     
     if os.path.exists(agent_path):
-        with open(agent_path, 'r') as f:
+        with open(agent_path, 'r', encoding='utf-8') as f:
             content = f.read()
         return HttpResponse(content, content_type='text/plain')
     else:
@@ -2795,7 +2893,7 @@ def user_logout(request):
     """
     try:
         request.user.auth_token.delete()
-    except:
+    except Exception:
         pass
     
     return Response({"message": "已登出"})
