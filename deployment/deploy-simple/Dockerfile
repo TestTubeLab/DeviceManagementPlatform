@@ -62,7 +62,7 @@ RUN mkdir -p /app/data /app/media /app/staticfiles
 
 # 复制启动脚本
 COPY deployment/deploy-simple/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # 暴露端口
 EXPOSE 8081

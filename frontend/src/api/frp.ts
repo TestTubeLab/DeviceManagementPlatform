@@ -11,8 +11,6 @@ export const updateFrpConfig = (data: {
   token?: string
   port_pool_start?: number
   port_pool_end?: number
-  web_port_pool_start?: number | null
-  web_port_pool_end?: number | null
   is_active?: boolean
   description?: string
 }) => {

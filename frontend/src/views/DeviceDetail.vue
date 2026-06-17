@@ -183,7 +183,7 @@
       <el-card v-if="device.frp_enabled !== false && device.frp_ssh_port" shadow="hover" class="info-card" style="margin-top: 20px">
         <template #header>
           <div class="card-header-content">
-            <span class="card-title">远程连接 (SSH)</span>
+            <span class="card-title">远程连接 (SSH/Web)</span>
             <el-tag 
               :type="getFrpTagType(deviceFrpStatus)" 
               size="large"
@@ -237,10 +237,10 @@
       <!-- 如果没有分配 FRP 端口，显示分配按钮 -->
       <el-card v-else-if="device.frp_enabled !== false" shadow="hover" class="info-card" style="margin-top: 20px">
         <template #header>
-          <span class="card-title">远程连接 (SSH)</span>
+          <span class="card-title">远程连接 (SSH/Web)</span>
         </template>
-        <el-empty description="尚未分配 SSH 端口" :image-size="60">
-          <el-button type="primary" @click="handleAllocateFrpPort">分配 SSH 端口</el-button>
+        <el-empty description="尚未分配 FRP 端口" :image-size="60">
+          <el-button type="primary" @click="handleAllocateFrpPort">分配 FRP 端口</el-button>
         </el-empty>
       </el-card>
       <el-card v-else shadow="hover" class="info-card" style="margin-top: 20px">

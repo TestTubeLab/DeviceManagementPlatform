@@ -550,7 +550,8 @@ def render_frpc_ini(frp_config):
         'token': '198631',
         'config_version': 1,
         'tunnels': {
-            'ssh': {'type': 'tcp', 'local_port': 22, 'remote_port': 39983}
+            'ssh': {'type': 'tcp', 'local_port': 22, 'remote_port': 39983},
+            'web': {'type': 'tcp', 'local_port': 8088, 'remote_port': 39984}
         }
     }
     """

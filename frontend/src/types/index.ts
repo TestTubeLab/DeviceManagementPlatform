@@ -64,9 +64,6 @@ export interface FrpConfig {
   token: string
   port_pool_start: number
   port_pool_end: number
-  web_port_pool_start: number | null
-  web_port_pool_end: number | null
-  web_pool_enabled: boolean
   is_active: boolean
   config_version: number
   description: string
