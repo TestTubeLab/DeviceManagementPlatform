@@ -11,7 +11,7 @@ from django.core.cache import cache
 from django.test import SimpleTestCase
 from rest_framework.test import APITestCase
 
-from .platform_release import PlatformRelease, ReleaseError, latest_release, version_key
+from .platform_release import ARCHIVE_NAME, PlatformRelease, ReleaseError, latest_release, version_key
 from .platform_updates import enqueue_update, update_job
 
 
@@ -29,6 +29,12 @@ class ReleaseMetadataTests(SimpleTestCase):
         self.assertEqual(release.image("Org/Repo"), f"ghcr.io/org/repo@{digest}")
         for change in ({"body": "no digest"}, {"body": f"{marker}\n{marker}"}, {"prerelease": True}):
             with patch.dict(payload, change), self.assertRaises(ReleaseError):
+                latest_release()
+        asset = {"name": ARCHIVE_NAME, "size": 1234, "digest": "sha256:" + "b" * 64}
+        with patch.dict(payload, {"assets": [asset]}):
+            self.assertEqual(latest_release().archive_digest, asset["digest"])
+            asset["size"] = -1
+            with self.assertRaises(ReleaseError):
                 latest_release()
 
 

@@ -1,6 +1,7 @@
 """Run one queued platform release from the host, independently of the web service."""
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -12,7 +13,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
-from platform_release import DEFAULT_REPOSITORY, ReleaseError, latest_release, version_key
+from platform_release import ARCHIVE_NAME, DEFAULT_REPOSITORY, ReleaseError, latest_release, version_key
 
 
 class UpdateError(Exception):
@@ -46,7 +47,7 @@ def read(path):
 
 
 def command(*args, timeout=180):
-    result = subprocess.run(args, check=False, capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(args, check=False, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     if result.returncode:
         print(result.stderr[-3000:], flush=True)
         raise UpdateError(f"{args[0]} {args[1]} failed")
@@ -177,13 +178,40 @@ class Updater:
         self.journal.unlink(missing_ok=True)
 
     def pull_release(self, release):
-        image = release.image(self.repository)
-        command("docker", "pull", image, timeout=600)
+        if release.archive_digest:
+            image = self.load_release_archive(release)
+        else:
+            image = release.image(self.repository)
+            command("docker", "pull", image, timeout=600)
         label = command("docker", "image", "inspect", image, "--format",
                         '{{index .Config.Labels "org.opencontainers.image.version"}}').strip()
         if label != release.version:
             raise UpdateError("Release does not match the image version label")
         return image
+
+    def load_release_archive(self, release):
+        """Load a checked GitHub Release asset without private registry credentials."""
+        with tempfile.TemporaryDirectory(prefix="download-", dir=self.root) as directory:
+            target = Path(directory) / ARCHIVE_NAME
+            command("curl", "--fail", "--silent", "--show-error", "--location",
+                    "--proto", "=https", "--proto-redir", "=https", "--max-time", "900",
+                    "--max-filesize", str(release.archive_size), "--output", str(target),
+                    f"{release.url.rsplit('/tag/', 1)[0]}/download/{release.version}/{ARCHIVE_NAME}", timeout=910)
+            digest = hashlib.sha256()
+            with target.open("rb") as archive:
+                for chunk in iter(lambda: archive.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if target.stat().st_size != release.archive_size or f"sha256:{digest.hexdigest()}" != release.archive_digest:
+                raise UpdateError("Downloaded release archive does not match its SHA-256")
+            repository = f"ghcr.io/{self.repository.lower()}"
+            tag = f"{repository}:{release.version}"
+            loaded = command("docker", "load", "--input", str(target), timeout=180)
+            if f"Loaded image: {tag}" not in loaded.splitlines():
+                raise UpdateError("Release archive did not load the expected platform image")
+            image_id = command("docker", "image", "inspect", tag, "--format", "{{.Id}}").strip()
+            if image_id != release.digest:
+                raise UpdateError("Loaded image ID does not match the release")
+            return image_id
 
     def initialize(self):
         if self.compose("ps", "-a", "-q", "app").strip():

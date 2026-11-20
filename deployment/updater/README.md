@@ -4,7 +4,7 @@
 
 ## 发布
 
-推送测试通过的代码和一个新的正式版本标签，例如 `v1.8.0`。使用附注标签时，把更新说明写在标签消息正文。GitHub Actions 构建 Linux amd64 镜像，推送到 GHCR，随后创建 GitHub Release。更新器按 Release 中的 SHA-256 镜像摘要拉取，部署主机需要读取该包的权限。
+推送测试通过的代码和一个新的正式版本标签，例如 `v1.8.0`。使用附注标签时，把更新说明写在标签消息正文。GitHub Actions 构建 Linux amd64 镜像并发布 GitHub Release。服务器使用 Release 的镜像包，检查 GitHub API 提供的 SHA-256 摘要后再加载。
 
 ## 安装
 

@@ -11,6 +11,7 @@ VERSION = re.compile(r"v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{
 REPOSITORY = re.compile(r"[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+")
 DIGEST_LINE = re.compile(r"^<!-- dmp-image: (sha256:[0-9a-f]{64}) -->$", re.MULTILINE)
 DEFAULT_REPOSITORY = "TestTubeLab/DeviceManagementPlatform"
+ARCHIVE_NAME = "device-platform-linux-amd64.tar.gz"
 
 
 class ReleaseError(Exception):
@@ -29,12 +30,14 @@ class PlatformRelease:
     notes: str
     published_at: str
     url: str
+    archive_digest: str = ""
+    archive_size: int = 0
 
     def image(self, repository):
         return f"ghcr.io/{repository.lower()}@{self.digest}"
 
     def public(self):
-        return {key: value for key, value in vars(self).items() if key != "digest"}
+        return {key: getattr(self, key) for key in ("version", "notes", "published_at", "url")}
 
 
 def latest_release(repository=DEFAULT_REPOSITORY):
@@ -67,10 +70,21 @@ def latest_release(repository=DEFAULT_REPOSITORY):
     digests = DIGEST_LINE.findall(notes)
     if len(digests) != 1:
         raise ReleaseError("The latest release is missing a unique image digest")
+    assets = payload.get("assets") or []
+    asset = next((item for item in assets if isinstance(item, dict) and item.get("name") == ARCHIVE_NAME), None)
+    archive_digest, archive_size = "", 0
+    if asset:
+        archive_digest = asset.get("digest")
+        archive_size = asset.get("size")
+        if (not isinstance(archive_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", archive_digest)
+                or type(archive_size) is not int or not 0 < archive_size < 1024 ** 3):
+            raise ReleaseError("Invalid release image archive metadata")
     return PlatformRelease(
         tag,
         digests[0],
         DIGEST_LINE.sub("", notes).strip()[:16000],
         str(payload.get("published_at") or "")[:40],
         f"https://github.com/{repository}/releases/tag/{tag}",
+        archive_digest,
+        archive_size,
     )
