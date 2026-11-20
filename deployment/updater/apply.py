@@ -89,55 +89,16 @@ class Updater:
         save(self.shared / "status.json", {**job, "status": stage, "message": message,
                                             "updated_at": int(time.time())})
 
-    def select_image(self, image, version=None):
-        label = command("docker", "image", "inspect", image, "--format",
-                        '{{index .Config.Labels "org.opencontainers.image.version"}}').strip()
-        version = label or version or "dev"
-        if version != "dev" and not version_key(version):
-            raise UpdateError("Cannot select an image without a valid platform version")
-        image_name = image.split("@", 1)[0] if "@" in image else image.rsplit(":", 1)[0]
-        self.update_compose_env(image_name, version)
-        services = {"app": {
-            "image": image, "pull_policy": "never",
+    def select_image(self, image):
+        save(self.override, {"services": {"app": {
+            "image": image,
+            "pull_policy": "never",
             "environment": {
                 "DMP_UPDATE_DIR": "/run/platform-updates",
                 "DMP_RELEASE_REPO": self.repository,
-                "DMP_VERSION": version,
             },
             "volumes": [{"type": "bind", "source": str(self.shared), "target": "/run/platform-updates"}],
-        }}
-        save(self.override, {"services": services})
-
-    def update_compose_env(self, image, version):
-        path = Path(self.config["project_directory"]) / ".env"
-        original = path.read_text(encoding="utf-8") if path.exists() else ""
-        mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
-        replacements = {"DMP_IMAGE": image, "DMP_VERSION": version}
-        found = set()
-        lines = []
-        for line in original.splitlines():
-            key = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else ""
-            if key in replacements:
-                if key not in found:
-                    lines.append(f"{key}={replacements[key]}")
-                    found.add(key)
-            else:
-                lines.append(line)
-        for key, value in replacements.items():
-            if key not in found:
-                lines.append(f"{key}={value}")
-        temporary = path.with_name(f".{path.name}.platform-update")
-        with temporary.open("w", encoding="utf-8") as output:
-            output.write("\n".join(lines).rstrip() + "\n")
-            output.flush()
-            os.fsync(output.fileno())
-        temporary.chmod(mode)
-        os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        }}})
 
     def app_id(self):
         ids = self.compose("ps", "-a", "-q", "app").split()
@@ -205,7 +166,12 @@ class Updater:
             for ending in ("-wal", "-shm", "-journal"):
                 Path(str(database) + ending).unlink(missing_ok=True)
             os.replace(temp, database)
-        self.select_image(transaction["previous_image"], transaction.get("previous_version"))
+        # Use the retained image even if the original tag was changed externally.
+        restored_override = transaction["previous_override"]
+        restored_override.setdefault("services", {}).setdefault("app", {}).update(
+            image=transaction["previous_image"], pull_policy="never",
+        )
+        save(self.override, restored_override)
         self.compose("up", "-d", "--no-deps", "--no-build", "--pull", "never", "app")
         self.wait_ready(transaction.get("previous_version"))
         save(self.journal, {**transaction, "phase": "restored"})
@@ -218,7 +184,14 @@ class Updater:
 
     def pull_release(self, release):
         if release.archive_digest:
-            image = self.load_release_archive(release)
+            image = f"ghcr.io/{self.repository.lower()}:{release.version}"
+            # Skip transfer when the exact published image is already in the local daemon.
+            local = subprocess.run(
+                ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+                check=False, capture_output=True, text=True, timeout=15,
+            )
+            if local.returncode != 0 or local.stdout.strip() != release.digest:
+                image = self.load_release_archive(release)
         else:
             image = release.image(self.repository)
             command("docker", "pull", image, timeout=600)
@@ -233,11 +206,11 @@ class Updater:
         with tempfile.TemporaryDirectory(prefix="download-", dir=self.root) as directory:
             target = Path(directory) / ARCHIVE_NAME
             command("curl", "--fail", "--silent", "--show-error", "--location",
-                    "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15", "--max-time", "900",
+                    "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15", "--max-time", "14400",
                     "--header", "Accept: application/octet-stream",
                     "--max-filesize", str(release.archive_size), "--output", str(target),
                     f"https://api.github.com/repos/{self.repository}/releases/assets/{release.archive_id}"
-                    f"?download={int(time.time())}", timeout=910)
+                    f"?download={int(time.time())}", timeout=14410)
             digest = hashlib.sha256()
             with target.open("rb") as archive:
                 for chunk in iter(lambda: archive.read(1024 * 1024), b""):
@@ -260,7 +233,7 @@ class Updater:
         release = latest_release(self.repository)
         if not release:
             raise UpdateError("No stable platform release available")
-        self.select_image(self.pull_release(release), release.version)
+        self.select_image(self.pull_release(release))
         self.compose("up", "-d", "--no-build", "registry")
         self.compose("up", "-d", "--no-deps", "--no-build", "--pull", "never", "app")
         self.wait_ready(release.version)
@@ -272,13 +245,7 @@ class Updater:
         if not release or release.version != job["version"]:
             raise UpdateError("GitHub latest release changed")
         current = self.inspect(self.app_id())
-        old_image = current["Config"]["Image"]
-        image_env = dict(item.split("=", 1) for item in current["Config"].get("Env", []) if "=" in item)
-        old_version = ((current["Config"].get("Labels") or {}).get("org.opencontainers.image.version")
-                       or image_env.get("DMP_VERSION"))
-        if not version_key(old_version or ""):
-            image_match = re.search(r"(?:^|:)(v?\d+\.\d+\.\d+)(?:[-@]|$)", current["Config"]["Image"])
-            old_version = image_match.group(1) if image_match else None
+        old_version = (current["Config"].get("Labels") or {}).get("org.opencontainers.image.version")
         if version_key(old_version):
             if version_key(release.version) <= version_key(old_version):
                 raise UpdateError("Release is not newer than the currently running version")
@@ -306,7 +273,7 @@ class Updater:
         command("docker", "image", "tag", current["Image"], previous)
         transaction = {"job": job, "backup": str(backup), "database": str(database),
                        "previous_version": old_version if version_key(old_version or "") else None,
-                       "previous_image": previous, "phase": "switching", "origin": old_image}
+                       "previous_image": previous, "previous_override": read(self.override), "phase": "switching"}
         save(backup / "transaction.json", transaction)
         save(self.journal, transaction)
         self.status(job, "switching")
@@ -315,7 +282,7 @@ class Updater:
         self.compose("stop", "-t", "25", "app")
         snapshot(database, backup / "writing.sqlite3")
         os.replace(backup / "writing.sqlite3", backup / "before.sqlite3")
-        self.select_image(image, release.version)
+        self.select_image(image)
         self.compose("up", "-d", "--no-deps", "--no-build", "--pull", "never", "app")
         self.wait_ready(release.version)
         # Commit before traffic resumes. Crash recovery must never restore after that point.

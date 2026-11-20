@@ -32,6 +32,7 @@ class PlatformRelease:
     url: str
     archive_digest: str = ""
     archive_size: int = 0
+    archive_id: int = 0
 
     def image(self, repository):
         return f"ghcr.io/{repository.lower()}@{self.digest}"
@@ -72,12 +73,14 @@ def latest_release(repository=DEFAULT_REPOSITORY):
         raise ReleaseError("The latest release is missing a unique image digest")
     assets = payload.get("assets") or []
     asset = next((item for item in assets if isinstance(item, dict) and item.get("name") == ARCHIVE_NAME), None)
-    archive_digest, archive_size = "", 0
+    archive_digest, archive_size, archive_id = "", 0, 0
     if asset:
         archive_digest = asset.get("digest")
         archive_size = asset.get("size")
+        archive_id = asset.get("id")
         if (not isinstance(archive_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", archive_digest)
-                or type(archive_size) is not int or not 0 < archive_size < 1024 ** 3):
+                or type(archive_size) is not int or not 0 < archive_size < 1024 ** 3
+                or type(archive_id) is not int or archive_id < 1):
             raise ReleaseError("Invalid release image archive metadata")
     return PlatformRelease(
         tag,
@@ -87,4 +90,5 @@ def latest_release(repository=DEFAULT_REPOSITORY):
         f"https://github.com/{repository}/releases/tag/{tag}",
         archive_digest,
         archive_size,
+        archive_id,
     )

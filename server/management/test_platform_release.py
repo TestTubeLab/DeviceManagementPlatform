@@ -30,7 +30,7 @@ class ReleaseMetadataTests(SimpleTestCase):
         for change in ({"body": "no digest"}, {"body": f"{marker}\n{marker}"}, {"prerelease": True}):
             with patch.dict(payload, change), self.assertRaises(ReleaseError):
                 latest_release()
-        asset = {"name": ARCHIVE_NAME, "size": 1234, "digest": "sha256:" + "b" * 64}
+        asset = {"name": ARCHIVE_NAME, "id": 123, "size": 1234, "digest": "sha256:" + "b" * 64}
         with patch.dict(payload, {"assets": [asset]}):
             self.assertEqual(latest_release().archive_digest, asset["digest"])
             asset["size"] = -1

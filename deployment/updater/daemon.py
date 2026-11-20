@@ -51,7 +51,7 @@ def main():
                 result = subprocess.run(
                     [sys.executable, str(APPLY), str(ROOT)],
                     check=False,
-                    timeout=1800,
+                    timeout=15300,
                 )
                 if result.returncode:
                     print(f"updater task exited with code {result.returncode}", flush=True)
