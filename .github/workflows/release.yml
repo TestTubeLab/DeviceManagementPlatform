@@ -85,7 +85,20 @@ jobs:
           notes_file="$(mktemp)"
           trap 'rm -f "$notes_file"' EXIT
           git tag -l --format='%(contents:body)' "$VERSION" > "$notes_file"
-          IMAGE_DIGEST="$(docker image inspect "$IMAGE_NAME:$VERSION" --format '{{.Id}}')"
-          printf '\n\n<!-- dmp-image: %s -->\n' "$IMAGE_DIGEST" >> "$notes_file"
           docker save "$IMAGE_NAME:$VERSION" | gzip -1 > device-platform-linux-amd64.tar.gz
+          IMAGE_DIGEST="$(python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import tarfile
+          with tarfile.open("device-platform-linux-amd64.tar.gz", "r:gz") as archive:
+              [image] = json.load(archive.extractfile("manifest.json"))
+              tag = f"{os.environ['IMAGE_NAME']}:{os.environ['VERSION']}"
+              if image["RepoTags"] != [tag]:
+                  raise SystemExit("Archive does not contain the expected release tag")
+              config = archive.extractfile(image["Config"]).read()
+              print("sha256:" + hashlib.sha256(config).hexdigest())
+          PY
+          )"
+          printf '\n\n<!-- dmp-image: %s -->\n' "$IMAGE_DIGEST" >> "$notes_file"
           gh release create "$VERSION" device-platform-linux-amd64.tar.gz --verify-tag --title "$VERSION" --notes-file "$notes_file"
