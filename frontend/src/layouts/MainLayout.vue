@@ -1,9 +1,15 @@
 <template>
-  <el-container class="layout-container">
+  <el-container class="layout-container" :class="{ 'system-logs-layout': route.path === '/system-logs', 'platform-settings-layout': route.path === '/platform-settings' }">
     <el-header class="header">
       <div class="header-left">
         <el-icon class="logo-icon"><Monitor /></el-icon>
         <span class="title">设备管理平台</span>
+        <router-link class="platform-version" to="/platform-settings" aria-label="查看平台版本和更新">
+          <el-tag size="small" :type="platformRelease.info?.update_available ? 'warning' : 'info'">
+            {{ platformRelease.info?.current_version || '版本' }}
+            <span v-if="platformRelease.info?.update_available" class="update-indicator"> ↑</span>
+          </el-tag>
+        </router-link>
       </div>
       <div class="header-right">
         <el-badge :value="activeTaskCount" class="item" :hidden="activeTaskCount === 0">
@@ -39,25 +45,33 @@
           router
           class="sidebar-menu"
         >
-          <el-menu-item index="/dashboard">
+          <el-menu-item index="/dashboard" aria-label="监控仪表盘" title="监控仪表盘">
             <el-icon><DataLine /></el-icon>
             <span>监控仪表盘</span>
           </el-menu-item>
-          <el-menu-item index="/devices">
+          <el-menu-item index="/devices" aria-label="设备管理" title="设备管理">
             <el-icon><Monitor /></el-icon>
             <span>设备管理</span>
           </el-menu-item>
-          <el-menu-item index="/projects">
+          <el-menu-item index="/projects" aria-label="项目管理" title="项目管理">
             <el-icon><FolderOpened /></el-icon>
             <span>项目管理</span>
           </el-menu-item>
-          <el-menu-item index="/tasks">
+          <el-menu-item index="/tasks" aria-label="任务管理" title="任务管理">
             <el-icon><List /></el-icon>
             <span>任务管理</span>
           </el-menu-item>
-          <el-menu-item index="/frp">
+          <el-menu-item index="/frp" aria-label="FRP管理" title="FRP管理">
             <el-icon><Connection /></el-icon>
             <span>FRP管理</span>
+          </el-menu-item>
+          <el-menu-item index="/system-logs" aria-label="系统日志" title="系统日志">
+            <el-icon><Document /></el-icon>
+            <span>系统日志</span>
+          </el-menu-item>
+          <el-menu-item index="/platform-settings" aria-label="平台设置" title="平台设置">
+            <el-icon><Setting /></el-icon>
+            <span>平台设置</span>
           </el-menu-item>
         </el-menu>
       </el-aside>
@@ -114,7 +128,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Monitor, DataLine, List, Bell, User, FolderOpened, SwitchButton, Connection } from '@element-plus/icons-vue'
+import { Monitor, DataLine, List, Bell, User, FolderOpened, SwitchButton, Connection, Document, Setting } from '@element-plus/icons-vue'
+import { isUpdateRunning, usePlatformRelease } from '@/stores/platformRelease'
 import { logout, getStoredUser, clearAuth } from '@/api/auth'
 import { getProjectDeployments, type ProjectDeployment } from '@/api/project'
 import {
@@ -127,6 +142,22 @@ import dayjs from 'dayjs'
 
 const route = useRoute()
 const router = useRouter()
+const platformRelease = usePlatformRelease()
+let nextReleaseCheck = 0
+let releaseTimer: ReturnType<typeof setInterval> | undefined
+
+onMounted(() => {
+  void platformRelease.load()
+  nextReleaseCheck = Date.now() + 30_000
+  releaseTimer = setInterval(() => {
+    const updating = isUpdateRunning(platformRelease.info?.job)
+    if (updating || Date.now() >= nextReleaseCheck) {
+      void platformRelease.load()
+      nextReleaseCheck = Date.now() + 30_000
+    }
+  }, 3000)
+})
+onUnmounted(() => clearInterval(releaseTimer))
 const showNotifications = ref(false)
 const activeDeployments = ref<ProjectDeployment[]>([])
 const activeTaskTotal = ref(0)
@@ -226,6 +257,9 @@ onUnmounted(() => {
   color: #303133;
 }
 
+.platform-version { text-decoration: none; flex-shrink: 0; }
+.update-indicator { font-weight: 700; }
+
 .header-right {
   display: flex;
   align-items: center;
@@ -257,6 +291,35 @@ onUnmounted(() => {
 .main-content {
   background: #f5f7fa;
   padding: 20px;
+}
+
+.system-logs-layout .main-content { min-width: 0; }
+
+@media (min-width: 761px) {
+  .system-logs-layout { height: 100vh; height: 100dvh; }
+  .system-logs-layout > .el-container { min-height: 0; }
+  .system-logs-layout .main-content { display: flex; }
+}
+
+@media (max-width: 760px) {
+  .platform-settings-layout .sidebar { width: 56px !important; flex-shrink: 0; }
+  .platform-settings-layout .sidebar :deep(.el-menu-item) { padding: 0 16px !important; }
+  .platform-settings-layout .sidebar :deep(.el-menu-item > span),
+  .platform-settings-layout .username { display: none; }
+  .platform-settings-layout .main-content { padding: 12px; min-width: 0; }
+  .platform-settings-layout .header { padding: 0 12px; }
+  .platform-settings-layout .header-left { gap: 8px; }
+  .platform-settings-layout .title { font-size: 16px; white-space: nowrap; }
+  .system-logs-layout .sidebar { width: 56px !important; flex-shrink: 0; }
+  .system-logs-layout .sidebar :deep(.el-menu-item) { padding: 0 16px !important; }
+  .system-logs-layout .sidebar :deep(.el-menu-item > span) { display: none; }
+  .system-logs-layout .sidebar :deep(.el-menu-item .el-icon) { margin-right: 0; }
+  .system-logs-layout .main-content { padding: 12px; }
+  .system-logs-layout .header { padding: 0 12px; }
+  .system-logs-layout .header-left { gap: 8px; }
+  .system-logs-layout .title { font-size: 16px; }
+  .system-logs-layout .username { display: none; }
+  .system-logs-layout .user-info { margin-left: 8px; }
 }
 
 .fade-enter-active,

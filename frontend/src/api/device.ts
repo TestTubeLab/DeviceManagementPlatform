@@ -130,8 +130,13 @@ export const rollbackConfig = (deviceId: string, configId: number) => {
 // ==================== 日志管理 API ====================
 
 // 日志任务类型
+export interface LogTaskCreated {
+  task_id: string | number
+  message: string
+}
+
 export interface LogTask {
-  task_id: number
+  task_id: string | number
   task_type: 'list' | 'read' | 'search' | 'download'
   status: 'pending' | 'processing' | 'completed' | 'failed'
   result: any
@@ -141,10 +146,11 @@ export interface LogTask {
 }
 
 // 列出日志文件
-export const listLogs = (deviceId: string, date?: string) => {
-  return request.post<any, { task_id: number, message: string }>(
+export const listLogs = (deviceId: string, date?: string, signal?: AbortSignal) => {
+  return request.post<any, LogTaskCreated>(
     `/devices/${deviceId}/list_logs/`,
-    { date }
+    { date },
+    { signal }
   )
 }
 
@@ -154,10 +160,11 @@ export const readLog = (deviceId: string, params: {
   file: string
   lines?: number
   tail?: boolean
-}) => {
-  return request.post<any, { task_id: number, message: string }>(
+}, signal?: AbortSignal) => {
+  return request.post<any, LogTaskCreated>(
     `/devices/${deviceId}/read_log/`,
-    params
+    params,
+    { signal }
   )
 }
 
@@ -168,10 +175,11 @@ export const searchLogs = (deviceId: string, params: {
   end_date?: string
   level?: string
   case_sensitive?: boolean
-}) => {
-  return request.post<any, { task_id: number, message: string }>(
+}, signal?: AbortSignal) => {
+  return request.post<any, LogTaskCreated>(
     `/devices/${deviceId}/search_logs/`,
-    params
+    params,
+    { signal }
   )
 }
 
@@ -179,18 +187,19 @@ export const searchLogs = (deviceId: string, params: {
 export const downloadLog = (deviceId: string, params: {
   date: string
   files: string[]
-}) => {
-  return request.post<any, { task_id: number, message: string }>(
+}, signal?: AbortSignal) => {
+  return request.post<any, LogTaskCreated>(
     `/devices/${deviceId}/download_log/`,
-    params
+    params,
+    { signal }
   )
 }
 
 // 查询日志任务结果
-export const getLogTaskResult = (deviceId: string, taskId: number) => {
+export const getLogTaskResult = (deviceId: string, taskId: string | number, signal?: AbortSignal) => {
   return request.get<any, LogTask>(
     `/devices/${deviceId}/log_task_result/`,
-    { params: { task_id: taskId } }
+    { params: { task_id: taskId }, signal }
   )
 }
 

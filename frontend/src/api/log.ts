@@ -3,7 +3,7 @@ import type { DeviceLog } from '@/types'
 
 // 获取日志列表
 export const getLogs = (params?: { device_id?: string }) => {
-  return request.get<any, { count: number, results: DeviceLog[] }>('/logs/', { params })
+  return request.get<any, { count: number, results: DeviceLog[] }>('/logs/', { params: { ...params, page_size: 100 } })
     .then(res => res.results || [])
 }
 

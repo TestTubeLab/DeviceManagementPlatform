@@ -1,0 +1,16 @@
+[Unit]
+Description=Device Management Platform host updater
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+Environment=DMP_UPDATE_ROOT=/var/lib/device-platform-updater
+ExecStart=/usr/bin/python3 /opt/device-platform-updater/daemon.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

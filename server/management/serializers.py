@@ -1,6 +1,8 @@
 """
 序列化器
 """
+from urllib.parse import urlsplit
+
 from rest_framework import serializers
 from .models import (
     Device, DeploymentTask, UpdateTask, DeviceLog, DockerImage,
@@ -17,6 +19,13 @@ class DeviceSerializer(serializers.ModelSerializer):
     agent_version = serializers.SerializerMethodField()
     ssh_connection_string = serializers.SerializerMethodField()
     web_access_url = serializers.SerializerMethodField()
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Legacy task payloads must not leak through the public device list/detail.
+        if isinstance(data.get('config'), dict):
+            data['config'] = {key: value for key, value in data['config'].items() if key != 'log_tasks'}
+        return data
 
     class Meta:
         model = Device
@@ -84,6 +93,28 @@ class FrpDeviceSerializer(serializers.ModelSerializer):
 class DeploymentTaskSerializer(serializers.ModelSerializer):
     """部署任务序列化器"""
     device_name = serializers.CharField(source='device.name', read_only=True)
+    image_info = serializers.SerializerMethodField()
+    container_name = serializers.CharField(source='config.container_name', read_only=True, default='middleware')
+    container_config = serializers.JSONField(source='config.container_config', read_only=True, default=dict)
+
+    def get_image_info(self, obj):
+        """将已有 config 镜像信息映射为旧 Agent 消费的顶层字段。"""
+        config = obj.config or {}
+        if not config.get('full_name'):
+            return {}
+        full_name = config['full_name']
+        request = self.context.get('request')
+        if request and full_name.startswith('registry:5000/'):
+            # Compose 服务名仅在平台网络内有效；设备沿用平台请求主机及已发布的仓库端口。
+            host = urlsplit(f'//{request.get_host()}').hostname
+            if ':' in host:
+                host = f'[{host}]'
+            full_name = f'{host}:5000/{full_name.partition("/")[2]}'
+        return {
+            'name': config.get('image_name', ''),
+            'tag': config.get('image_tag', obj.target_version),
+            'full_name': full_name,
+        }
     
     class Meta:
         model = DeploymentTask
@@ -104,6 +135,7 @@ class UpdateTaskSerializer(serializers.ModelSerializer):
 class DeviceLogSerializer(serializers.ModelSerializer):
     """设备日志序列化器"""
     device_name = serializers.CharField(source='device.name', read_only=True)
+    device_id = serializers.CharField(source='device.device_id', read_only=True)
     
     class Meta:
         model = DeviceLog
@@ -258,7 +290,8 @@ class ProjectDeploymentSerializer(serializers.ModelSerializer):
                 'id': project.code_package.id,
                 'name': project.code_package.name,
                 'version': project.code_package.version,
-                'size': project.code_package.size
+                'size': project.code_package.size,
+                'checksum': project.code_package.checksum,
             }
         
         # 获取配置

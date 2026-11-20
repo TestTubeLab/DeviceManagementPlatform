@@ -1,6 +1,7 @@
 """
 设备管理核心数据模型
 """
+from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
@@ -344,6 +345,47 @@ class DeviceLog(models.Model):
         return f"[{self.level}] {self.device.device_id}: {self.message[:50]}"
 
 
+class SystemLog(models.Model):
+    """Platform audit events; snapshots survive deletion of their targets."""
+
+    timestamp = models.DateTimeField(default=timezone.now, db_index=True)
+    level = models.CharField(max_length=10, choices=DeviceLog.LEVEL_CHOICES)
+    module = models.CharField(max_length=40)
+    action = models.CharField(max_length=80)
+    actor = models.CharField(max_length=150, blank=True)
+    target = models.CharField(max_length=300, blank=True)
+    result = models.CharField(max_length=12, choices=[
+        ('submitted', '已下发'), ('success', '成功'), ('failed', '失败'),
+    ])
+    message = models.TextField(blank=True)
+    detail = models.TextField(blank=True)
+    device_id = models.CharField(max_length=100, blank=True)
+    task_id = models.CharField(max_length=100, blank=True)
+    event_key = models.CharField(max_length=200, null=True, blank=True, unique=True)
+
+    class Meta:
+        ordering = ['-timestamp', '-id']
+        indexes = [models.Index(fields=['module', '-timestamp'], name='syslog_module_time')]
+
+
+class DeviceLogTask(models.Model):
+    """Remote log requests, isolated from heartbeat/configuration writes."""
+
+    device = models.ForeignKey(Device, on_delete=models.CASCADE)
+    task_id = models.CharField(max_length=100)
+    task_type = models.CharField(max_length=20)
+    params = models.JSONField(default=dict)
+    status = models.CharField(max_length=12, default='pending')
+    result = models.JSONField(default=dict)
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['device', 'task_id'], name='unique_device_log_task')]
+        indexes = [models.Index(fields=['device', 'status', 'created_at'], name='devlogtask_state_time')]
+
+
 class ProjectConfig(models.Model):
     """项目配置"""
     
@@ -462,6 +504,61 @@ class DeviceConfigHistory(models.Model):
 
     def __str__(self):
         return f"{self.device.device_id} - {self.get_status_display()} ({self.applied_at})"
+
+
+class DeviceSshManagement(models.Model):
+    """保存 SSH 管理通道凭据和 Agent 最近一次安全状态。"""
+
+    device = models.OneToOneField(Device, on_delete=models.CASCADE, related_name='ssh_management')
+    credential_hash = models.CharField(max_length=64, blank=True)
+    frp_publickey_locked = models.BooleanField(default=False)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    reported_state = models.JSONField(default=dict, blank=True)
+    reported_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class DeviceSshTask(models.Model):
+    """记录单设备 SSH 管理任务和审计结果。"""
+
+    STATUS_CHOICES = [
+        ('pending', '待领取'),
+        ('processing', '执行中'),
+        ('completed', '已完成'),
+        ('failed', '失败'),
+        ('expired', '已过期'),
+    ]
+
+    device = models.ForeignKey(Device, on_delete=models.CASCADE, related_name='ssh_management_tasks')
+    task_id = models.CharField(max_length=32, unique=True)
+    task_type = models.CharField(max_length=40)
+    payload = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='requested_device_ssh_tasks',
+    )
+    result = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['device', 'status', 'created_at'], name='mgmt_sshdev_status_idx'),
+            models.Index(fields=['expires_at', 'status'], name='mgmt_ssh_exp_status_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['device'], condition=models.Q(status__in=['pending', 'processing']),
+                name='mgmt_ssh_one_open_task',
+            ),
+        ]
+        permissions = [('manage_device_ssh', 'Can manage device SSH access')]
 
 
 class FrpServerConfig(models.Model):

@@ -102,6 +102,7 @@
             <el-input
               v-model="deviceGroup"
               placeholder="如：XX医院-流水线A"
+              @input="deviceGroupDirty = true"
               @blur="handleGroupChange"
             />
           </el-form-item>
@@ -251,6 +252,17 @@
           <el-button type="primary" @click="router.push('/frp')">前往 FRP 管理</el-button>
         </el-empty>
       </el-card>
+
+      <div v-if="canOpenSshManagement" style="margin-top: 12px">
+        <el-button :icon="Setting" @click="showSshManagement = true">SSH 管理</el-button>
+      </div>
+      <DeviceSshDialog
+        v-if="showSshManagement"
+        :key="device.device_id"
+        :device-id="device.device_id"
+        :external-port="device.frp_ssh_port ?? null"
+        @close="showSshManagement = false"
+      />
 
       <!-- 资源使用情况 -->
       <el-row :gutter="20" style="margin-top: 20px">
@@ -572,13 +584,13 @@
                 <!-- 行数限制 -->
                 <el-input-number 
                   v-model="logLines" 
-                  :min="0" 
-                  :max="10000" 
+                  :min="1"
+                  :max="2000"
                   :step="100"
                   controls-position="right"
                   style="width: 150px"
                 />
-                <span>行（0=全部）</span>
+                <span>行（最多2000）</span>
                 
                 <!-- 从尾部读取 -->
                 <el-checkbox v-model="logTail">尾部读取</el-checkbox>
@@ -587,7 +599,7 @@
                 <el-button 
                   :icon="Download" 
                   @click="handleDownloadLog"
-                  :disabled="!currentLogFile"
+                  :disabled="!currentLogFile || logTaskBusy"
                 >
                   下载
                 </el-button>
@@ -595,8 +607,9 @@
             </div>
             
             <!-- 日志内容显示 -->
+            <el-alert v-if="logTaskError" :title="logTaskError" type="error" :closable="false" show-icon />
             <div v-loading="loadingLogContent" class="logs-content-panel">
-              <div v-if="!currentLogFile" class="empty-hint">
+              <div v-if="!currentLogFile && !searchMode" class="empty-hint">
                 <el-empty description="请从左侧选择日志文件" />
               </div>
               
@@ -642,9 +655,10 @@
               <span v-if="currentLogFile">
                 当前文件：{{ currentLogDate }}/{{ currentLogFile }}
               </span>
-              <span v-if="logTotalLines > 0">
+              <span v-if="!searchMode && logTotalLines > 0">
                 总行数：{{ logTotalLines }} | 显示：{{ logReturnedLines }} 行
               </span>
+              <span v-if="searchMode ? searchResults.truncated : logTruncated">结果已截断</span>
             </div>
           </div>
         </div>
@@ -654,7 +668,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { ref, h, nextTick, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Refresh, Setting, Delete, Edit, Document, Camera, Connection, Monitor, Calendar, Search, Download, FolderOpened } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -662,12 +676,16 @@ import { useDeviceStore } from '@/stores/device'
 import { 
   restartDevice, deleteDevice, updateDevice, getContainerLogs, updateAgent,
   getCurrentConfig, applyConfig, getConfigHistory, rollbackConfig,
-  listLogs, readLog, searchLogs, downloadLog, getLogTaskResult,
+  listLogs, readLog, searchLogs, downloadLog,
   allocateFrpPorts,
-  type DeviceConfig, type ConfigHistory 
+  type DeviceConfig, type ConfigHistory, type LogTaskCreated
 } from '@/api/device'
+import { waitForLogTask, type BusinessFiles, type BusinessContent, type BusinessSearch, type BusinessArchive } from '@/api/systemLogs'
+import { downloadLogBlob, useLogRequest } from '@/components/system-logs/useLogRequest'
 import { getProjects } from '@/api/project'
 import StatusBadge from '@/components/StatusBadge.vue'
+import DeviceSshDialog from '@/components/DeviceSshDialog.vue'
+import { getStoredUser } from '@/api/auth'
 import { copyToClipboard } from '@/utils/clipboard'
 import {
   type DisplayContainerStatus,
@@ -685,6 +703,8 @@ const router = useRouter()
 const deviceStore = useDeviceStore()
 
 const device = computed(() => deviceStore.currentDevice)
+const canOpenSshManagement = Boolean(getStoredUser()?.is_staff)
+const showSshManagement = ref(false)
 const deviceOnline = computed(() => device.value ? isDeviceCurrentlyOnline(device.value) : false)
 const deviceServiceStatus = computed(() => device.value ? getDeviceDisplayServiceStatus(device.value) : 'unknown')
 const deviceContainerStatus = computed<DisplayContainerStatus>(() => (
@@ -703,6 +723,7 @@ const deviceFrpAlertText = computed(() => {
 const projects = ref<any[]>([])
 const autoDeployProject = ref<number | null>(null)
 const deviceGroup = ref('')
+const deviceGroupDirty = ref(false)
 
 // 编辑设备信息
 const showEditDialog = ref(false)
@@ -747,9 +768,11 @@ const configHistory = ref<ConfigHistory[]>([])
 
 // 日志中心相关
 const showLogsCenterDialog = ref(false)
-const loadingDates = ref(false)
-const loadingLogContent = ref(false)
-const searchingLogs = ref(false)
+const logOperation = ref<'list' | 'read' | 'search' | 'download'>('list')
+const { busy: logTaskBusy, error: logTaskError, run: runLogRequest, cancel: cancelLogRequest } = useLogRequest(() => {})
+const loadingDates = computed(() => logTaskBusy.value && logOperation.value === 'list')
+const loadingLogContent = computed(() => logTaskBusy.value && logOperation.value === 'read')
+const searchingLogs = computed(() => logTaskBusy.value && logOperation.value === 'search')
 
 // 日志树数据
 const logTree = ref<any[]>([])
@@ -760,6 +783,7 @@ const currentLogFile = ref('')
 const logContent = ref('')
 const logTotalLines = ref(0)
 const logReturnedLines = ref(0)
+const logTruncated = ref(false)
 
 // 搜索相关
 const logSearchKeyword = ref('')
@@ -802,15 +826,25 @@ const filteredCenterLogs = computed(() => {
 })
 
 // 监听device变化，更新自动部署项目和分组
-watch(device, (newDevice) => {
+watch(device, (newDevice, oldDevice) => {
   if (newDevice) {
+    const changedDevice = newDevice.device_id !== oldDevice?.device_id
     autoDeployProject.value = newDevice.auto_deploy_project || null
-    deviceGroup.value = newDevice.group || ''
-    // 初始化编辑表单
-    editForm.value.name = newDevice.name || ''
-    editForm.value.location = newDevice.location || ''
+    if (changedDevice) deviceGroupDirty.value = false
+    if (!deviceGroupDirty.value) deviceGroup.value = newDevice.group || ''
+    // 资源快照刷新不能覆盖打开中的编辑草稿。
+    if (changedDevice || !showEditDialog.value) {
+      editForm.value.name = newDevice.name || ''
+      editForm.value.location = newDevice.location || ''
+    }
   }
 }, { immediate: true })
+
+watch(showEditDialog, opened => {
+  if (opened && device.value) {
+    editForm.value = { name: device.value.name || '', location: device.value.location || '' }
+  }
+})
 
 // 保存设备信息编辑
 const handleSaveEdit = async () => {
@@ -1170,10 +1204,9 @@ const loadConfigHistory = async () => {
 // 查看配置详情
 const viewConfigDetail = (item: ConfigHistory) => {
   ElMessageBox.alert(
-    `<pre style="max-height: 400px; overflow: auto">${JSON.stringify(item.config_data, null, 2)}</pre>`,
+    h('pre', { style: { maxHeight: '400px', overflow: 'auto' } }, JSON.stringify(item.config_data, null, 2)),
     '配置详情',
     {
-      dangerouslyUseHTMLString: true,
       confirmButtonText: '关闭'
     }
   )
@@ -1251,11 +1284,14 @@ const handleAutoDeployChange = async () => {
 
 const handleGroupChange = async () => {
   if (!device.value) return
+  const deviceId = device.value.device_id
+  const group = deviceGroup.value
   
   try {
-    await updateDevice(device.value.device_id, {
-      group: deviceGroup.value
+    await updateDevice(deviceId, {
+      group
     })
+    if (device.value?.device_id === deviceId && deviceGroup.value === group) deviceGroupDirty.value = false
     ElMessage.success('设备分组已更新')
   } catch (error) {
     ElMessage.error('更新失败')
@@ -1294,45 +1330,43 @@ onUnmounted(() => {
 
 // ==================== 日志中心功能 ====================
 
+function runLogTask<T>(
+  operation: typeof logOperation.value,
+  create: (deviceId: string, signal: AbortSignal) => Promise<LogTaskCreated>,
+  apply: (result: T) => void,
+) {
+  const deviceId = device.value?.device_id
+  if (!deviceId || !showLogsCenterDialog.value || route.params.id !== deviceId) return
+  // 文件切换取代旧操作；创建与轮询共用60秒期限及取消信号。
+  cancelLogRequest()
+  logOperation.value = operation
+  return runLogRequest(async signal => {
+    const { task_id } = await create(deviceId, signal)
+    signal.throwIfAborted()
+    return waitForLogTask<T>(deviceId, task_id, signal)
+  }, result => {
+    if (showLogsCenterDialog.value && device.value?.device_id === deviceId && route.params.id === deviceId) apply(result)
+  })
+}
+
 // 加载日志日期列表
 const loadLogDates = async () => {
-  if (!device.value) return
-  
-  loadingDates.value = true
-  try {
-    // 创建列表任务
-    const { task_id } = await listLogs(device.value.device_id)
-    
-    // 轮询任务结果
-    const result = await pollTaskResult(task_id)
-    
-    if (result.status === 'completed') {
-      const { dates, files } = result.result
-      
-      // 构建树形结构
-      logTree.value = dates.map((date: string) => ({
-        id: `date_${date}`,
-        label: date,
-        type: 'date',
-        children: files[date]?.map((file: string) => ({
-          id: `file_${date}_${file}`,
-          label: file,
-          type: 'file',
-          date: date,
-          file: file,
-          special: file === 'FileCleaner.log' || file === '00h00m.log'
-        })) || []
-      }))
-      
-      ElMessage.success('日志列表加载成功')
-    } else {
-      ElMessage.error(result.error_message || '加载日志列表失败')
-    }
-  } catch (error) {
-    ElMessage.error('加载日志列表失败')
-  } finally {
-    loadingDates.value = false
-  }
+  return runLogTask<BusinessFiles>('list', (deviceId, signal) => listLogs(deviceId, undefined, signal), ({ dates, files }) => {
+    logTree.value = dates.map(date => ({
+      id: `date_${date}`,
+      label: date,
+      type: 'date',
+      children: files[date]?.map(file => ({
+        id: `file_${date}_${file}`,
+        label: file,
+        type: 'file',
+        date,
+        file,
+        special: file === 'FileCleaner.log' || file === '00h00m.log'
+      })) || []
+    }))
+    ElMessage.success('日志列表加载成功')
+  })
 }
 
 // 点击树节点
@@ -1349,39 +1383,24 @@ const loadLogContent = async (date: string, file: string) => {
   searchMode.value = false
   currentLogDate.value = date
   currentLogFile.value = file
-  loadingLogContent.value = true
-  
-  try {
-    const { task_id } = await readLog(device.value.device_id, {
-      date,
-      file,
-      lines: logLines.value,
-      tail: logTail.value
-    })
-    
-    const result = await pollTaskResult(task_id)
-    
-    if (result.status === 'completed') {
-      logContent.value = result.result.content
-      logTotalLines.value = result.result.total_lines
-      logReturnedLines.value = result.result.returned_lines
-      
-      // 滚动到底部（如果是tail模式）
-      if (logTail.value) {
-        setTimeout(() => {
-          if (logContentRef.value) {
-            logContentRef.value.scrollTop = logContentRef.value.scrollHeight
-          }
-        }, 100)
-      }
-    } else {
-      ElMessage.error(result.error_message || '读取日志失败')
+  logContent.value = ''
+  logTotalLines.value = 0
+  logReturnedLines.value = 0
+  logTruncated.value = false
+  const params = { date, file, lines: Math.min(2000, Math.max(1, logLines.value || 500)), tail: logTail.value }
+  return runLogTask<BusinessContent>('read', (deviceId, signal) => readLog(deviceId, params, signal), result => {
+    logContent.value = result.content
+    logTotalLines.value = result.total_lines
+    logReturnedLines.value = result.returned_lines
+    logTruncated.value = !!result.truncated
+    if (params.tail) {
+      void nextTick(() => {
+        if (showLogsCenterDialog.value && currentLogDate.value === date && currentLogFile.value === file && logContentRef.value) {
+          logContentRef.value.scrollTop = logContentRef.value.scrollHeight
+        }
+      })
     }
-  } catch (error) {
-    ElMessage.error('读取日志失败')
-  } finally {
-    loadingLogContent.value = false
-  }
+  })
 }
 
 // 搜索日志
@@ -1392,87 +1411,23 @@ const handleSearchLogs = async () => {
   }
   
   searchMode.value = true
-  searchingLogs.value = true
-  
-  try {
-    const { task_id } = await searchLogs(device.value.device_id, {
-      keyword: logSearchKeyword.value,
-      level: logLevelFilterCenter.value,
-      case_sensitive: false
-    })
-    
-    const result = await pollTaskResult(task_id)
-    
-    if (result.status === 'completed') {
-      searchResults.value = result.result
-      ElMessage.success(`找到 ${result.result.total_matches} 条匹配`)
-    } else {
-      ElMessage.error(result.error_message || '搜索失败')
-    }
-  } catch (error) {
-    ElMessage.error('搜索失败')
-  } finally {
-    searchingLogs.value = false
-  }
+  searchResults.value = { matches: [], total_matches: 0, returned_matches: 0 }
+  const params = { keyword: logSearchKeyword.value, level: logLevelFilterCenter.value, case_sensitive: false }
+  return runLogTask<BusinessSearch>('search', (deviceId, signal) => searchLogs(deviceId, params, signal), result => {
+    searchResults.value = result
+    ElMessage.success(`找到 ${result.total_matches} 条匹配`)
+  })
 }
 
 // 下载日志
 const handleDownloadLog = async () => {
-  if (!device.value || !currentLogDate.value || !currentLogFile.value) return
-  
-  try {
-    const { task_id } = await downloadLog(device.value.device_id, {
-      date: currentLogDate.value,
-      files: [currentLogFile.value]
-    })
-    
-    ElMessage.info('正在准备下载...')
-    
-    const result = await pollTaskResult(task_id, 30000)  // 30秒超时
-    
-    if (result.status === 'completed') {
-      // Base64解码并下载
-      const { content, filename } = result.result
-      const binaryString = atob(content)
-      const bytes = new Uint8Array(binaryString.length)
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i)
-      }
-      const blob = new Blob([bytes], { type: 'application/zip' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename
-      a.click()
-      URL.revokeObjectURL(url)
-      
-      ElMessage.success('下载成功')
-    } else {
-      ElMessage.error(result.error_message || '下载失败')
-    }
-  } catch (error) {
-    ElMessage.error('下载失败')
-  }
-}
-
-// 轮询任务结果（通用函数）
-const pollTaskResult = async (taskId: number, timeout: number = 10000): Promise<any> => {
-  if (!device.value) throw new Error('设备不存在')
-  
-  const startTime = Date.now()
-  
-  while (Date.now() - startTime < timeout) {
-    const result = await getLogTaskResult(device.value.device_id, taskId)
-    
-    if (result.status === 'completed' || result.status === 'failed') {
-      return result
-    }
-    
-    // 等待1秒后重试
-    await new Promise(resolve => setTimeout(resolve, 1000))
-  }
-  
-  throw new Error('任务超时')
+  if (!device.value || !currentLogDate.value || !currentLogFile.value || logTaskBusy.value) return
+  const params = { date: currentLogDate.value, files: [currentLogFile.value] }
+  return runLogTask<BusinessArchive>('download', (deviceId, signal) => downloadLog(deviceId, params, signal), ({ content, filename }) => {
+    const bytes = Uint8Array.from(atob(content), char => char.charCodeAt(0))
+    downloadLogBlob(new Blob([bytes], { type: 'application/zip' }), filename)
+    ElMessage.success('下载成功')
+  })
 }
 
 // 高亮关键词
@@ -1499,10 +1454,25 @@ const highlightKeyword = (text: string) => {
 
 // 监听对话框打开
 watch(showLogsCenterDialog, (newVal) => {
-  if (newVal && logTree.value.length === 0) {
+  if (!newVal) cancelLogRequest()
+  else if (logTree.value.length === 0) {
     loadLogDates()
   }
-})
+}, { flush: 'sync' })
+
+watch([() => route.params.id, () => device.value?.device_id], () => {
+  cancelLogRequest()
+  showLogsCenterDialog.value = false
+  logTree.value = []
+  currentLogDate.value = ''
+  currentLogFile.value = ''
+  logContent.value = ''
+  logTotalLines.value = 0
+  logReturnedLines.value = 0
+  logTruncated.value = false
+  searchMode.value = false
+  searchResults.value = { matches: [], total_matches: 0, returned_matches: 0 }
+}, { flush: 'sync' })
 </script>
 
 <style scoped>

@@ -58,6 +58,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'management.middleware.OperationLogMiddleware',
 ]
 
 ROOT_URLCONF = 'core.urls'
@@ -154,6 +155,9 @@ DOCKER_REGISTRY_URL = os.getenv('DOCKER_REGISTRY_URL', 'localhost:5000')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Platform audit events; device file retention remains an Agent/host policy.
+SYSTEM_LOG_RETENTION_DAYS = int(os.getenv('SYSTEM_LOG_RETENTION_DAYS', '90'))
+
 # REST Framework配置
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
@@ -187,6 +191,10 @@ DEFAULT_CHARSET = 'utf-8'
 # =============================================================================
 # FRP 内网穿透配置（支持云端热替换）
 # =============================================================================
+DEVICE_SSH_MANAGEMENT_ENABLED = os.getenv('DEVICE_SSH_MANAGEMENT_ENABLED') == '1'
+if os.getenv('DEVICE_SSH_TRUST_HTTPS_PROXY') == '1':
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 FRP_CONFIG = {
     'enabled': os.getenv('FRP_ENABLED', 'True') == 'True',
     'server_addr': os.getenv('FRP_SERVER_ADDR', 'frp9.mmszxc.xin'),

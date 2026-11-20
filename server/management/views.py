@@ -6,23 +6,30 @@ import hashlib
 import os
 import subprocess
 import json
+import uuid
 from io import StringIO
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django.http import HttpResponse
 from django.contrib.auth import authenticate
-from rest_framework import viewsets, status
+from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.authtoken.models import Token
+from .log_queries import LogPagination, SystemLogSerializer, filter_logs
+from .log_tasks import (
+    ServiceLogRequest, claim_log_tasks, create_log_task, finish_log_task,
+    get_log_task, supports_service_logs,
+)
 from .models import (
     Device, DeploymentTask, UpdateTask, DeviceLog, DockerImage,
-    CodePackage, Project, ProjectConfig, ProjectDeployment, FrpServerConfig
+    CodePackage, Project, ProjectConfig, ProjectDeployment, FrpServerConfig, SystemLog
 )
+from .models import DeviceSshManagement
 from .serializers import (
     DeviceSerializer, DeploymentTaskSerializer,
     UpdateTaskSerializer, DeviceLogSerializer, DockerImageSerializer,
@@ -31,7 +38,7 @@ from .serializers import (
 )
 
 # Agent 最新版本号（每次更新 Agent 时需要同步修改）
-AGENT_VERSION = "1.7.2"  # 修复 PLC 配置写入 socket.yml
+AGENT_VERSION = "1.7.3"  # 增加只读系统服务日志采集
 FRP_WEB_LOCAL_PORT = 8088
 
 
@@ -368,6 +375,9 @@ def build_frp_config_for_device(device, frp_config=None):
     if not is_valid_frp_port_pair(device, frp_config):
         return None
 
+    # 已确认的远程策略不随管理入口停用、凭据撤销或旧 Agent 请求而放宽。
+    locked = DeviceSshManagement.objects.filter(device=device, frp_publickey_locked=True).exists()
+
     return {
         'server_addr': frp_config.server_addr,
         'server_port': frp_config.server_port,
@@ -376,7 +386,7 @@ def build_frp_config_for_device(device, frp_config=None):
         'tunnels': {
             'ssh': {
                 'type': 'tcp',
-                'local_port': 22,
+                'local_port': 2222 if locked else 22,
                 'remote_port': device.frp_ssh_port,
             },
             'web': {
@@ -1197,79 +1207,31 @@ class DeviceViewSet(viewsets.ModelViewSet):
     
     # ==================== 日志管理辅助方法 ====================
     def _create_log_task(self, device, task_type, params):
-        """
-        创建日志任务（无需数据库迁移）
-        存储在 Device.config['log_tasks'] 中
-        """
-        import time
-        from datetime import timedelta
-        
-        # 确保 config 存在
-        if not device.config:
-            device.config = {}
-        if 'log_tasks' not in device.config:
-            device.config['log_tasks'] = {}
-        
-        # 生成任务ID（时间戳）
-        task_id = str(int(time.time() * 1000))
-        
-        # 创建任务
-        device.config['log_tasks'][task_id] = {
-            'task_type': task_type,
-            'params': params,
-            'status': 'pending',
-            'result': {},
-            'error_message': '',
-            'created_at': timezone.now().isoformat(),
-            'completed_at': None
-        }
-        
-        # 清理7天前的已完成任务
-        seven_days_ago = timezone.now() - timedelta(days=7)
-        to_delete = []
-        for tid, task in device.config['log_tasks'].items():
-            if task['status'] in ['completed', 'failed']:
-                try:
-                    created_at = timezone.datetime.fromisoformat(task['created_at'])
-                    if created_at < seven_days_ago:
-                        to_delete.append(tid)
-                except Exception:
-                    pass
-        
-        for tid in to_delete:
-            del device.config['log_tasks'][tid]
-        
-        device.save()
-        
-        return task_id
+        """兼容旧 Agent 的日志任务入口，任务不再占用设备配置。"""
+        return create_log_task(device, task_type, params)
     
     def _get_log_task(self, device, task_id):
         """获取日志任务"""
-        if not device.config or 'log_tasks' not in device.config:
-            return None
-        return device.config['log_tasks'].get(str(task_id))
+        return get_log_task(device, task_id)
     
     def _update_log_task(self, device, task_id, task_status, result=None, error_message=''):
         """更新日志任务状态"""
-        if not device.config or 'log_tasks' not in device.config:
-            return False
-        
-        task_id_str = str(task_id)
-        if task_id_str not in device.config['log_tasks']:
-            return False
-        
-        device.config['log_tasks'][task_id_str]['status'] = task_status
-        if result is not None:
-            device.config['log_tasks'][task_id_str]['result'] = result
-        if error_message:
-            device.config['log_tasks'][task_id_str]['error_message'] = error_message
-        if task_status in ['completed', 'failed']:
-            device.config['log_tasks'][task_id_str]['completed_at'] = timezone.now().isoformat()
-        
-        device.save()
-        return True
+        return finish_log_task(device, task_id, task_status, result, error_message)
     
     # ==================== 日志管理 API ====================
+    @action(detail=True, methods=['post'])
+    def service_logs(self, request, device_id=None):
+        """下发只读 journal 查询；旧 Agent 不会收到无法执行的任务。"""
+        device = self.get_object()
+        if not device.is_online:
+            return Response({'error': '设备离线，无法查询服务日志'}, status=status.HTTP_409_CONFLICT)
+        if not supports_service_logs(device):
+            return Response({'error': '请先将设备 Agent 升级至 1.7.3 或更高版本'}, status=status.HTTP_409_CONFLICT)
+        serializer = ServiceLogRequest(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        task_id = create_log_task(device, 'journal', serializer.validated_data)
+        return Response({'task_id': task_id, 'message': '服务日志查询任务已创建'})
+
     @action(detail=True, methods=['post'])
     def list_logs(self, request, device_id=None):
         """
@@ -1367,28 +1329,13 @@ class DeviceViewSet(viewsets.ModelViewSet):
         """
         Agent轮询待执行的日志任务
         GET /api/devices/{device_id}/pending_log_tasks/
+        可选 limit 为 1–5 的整数，默认 5；只领取实际返回的任务。
         """
         device = self.get_object()
-        
-        if not device.config or 'log_tasks' not in device.config:
-            return Response({'tasks': []})
-        
-        # 获取所有pending状态的任务
-        pending_tasks = []
-        for task_id, task in device.config['log_tasks'].items():
-            if task['status'] == 'pending':
-                pending_tasks.append({
-                    'task_id': task_id,
-                    'task_type': task['task_type'],
-                    'params': task['params']
-                })
-                # 标记为processing
-                device.config['log_tasks'][task_id]['status'] = 'processing'
-        
-        if pending_tasks:
-            device.save()
-        
-        return Response({'tasks': pending_tasks[:5]})  # 最多返回5个
+        limit = serializers.IntegerField(min_value=1, max_value=5).run_validation(
+            request.query_params.get('limit', 5)
+        )
+        return Response({'tasks': claim_log_tasks(device, limit=limit)})
     
     @action(detail=True, methods=['post'], permission_classes=[AllowAny])
     def report_log_task(self, request, device_id=None):
@@ -1866,6 +1813,7 @@ class DeploymentTaskViewSet(viewsets.ModelViewSet):
     """部署任务API"""
     queryset = DeploymentTask.objects.all()
     serializer_class = DeploymentTaskSerializer
+    permission_classes = [IsAuthenticated]
     
     def get_permissions(self):
         """Agent调用的接口不需要认证"""
@@ -1908,6 +1856,13 @@ class UpdateTaskViewSet(viewsets.ModelViewSet):
     """更新任务API"""
     queryset = UpdateTask.objects.all()
     serializer_class = UpdateTaskSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        """保留旧 Agent 的任务读取和进度回调，管理写操作需要登录。"""
+        if self.action in ['list', 'retrieve', 'update_progress']:
+            return [AllowAny()]
+        return super().get_permissions()
     
     @action(detail=True, methods=['post'], permission_classes=[AllowAny])
     def update_progress(self, request, pk=None):
@@ -1930,14 +1885,23 @@ class DeviceLogViewSet(viewsets.ModelViewSet):
     """设备日志API"""
     queryset = DeviceLog.objects.all()
     serializer_class = DeviceLogSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = LogPagination
     
     def get_queryset(self):
         """支持按设备ID过滤"""
-        queryset = super().get_queryset()
-        device_id = self.request.query_params.get('device_id')
-        if device_id:
-            queryset = queryset.filter(device__device_id=device_id)
-        return queryset
+        return filter_logs(super().get_queryset().select_related('device'), self.request.query_params)
+
+
+class SystemLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """所有登录用户可查询，平台事件不提供 Web 修改或删除入口。"""
+    queryset = SystemLog.objects.all()
+    serializer_class = SystemLogSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = LogPagination
+
+    def get_queryset(self):
+        return filter_logs(super().get_queryset(), self.request.query_params, platform=True)
 
 
 # ==================== 辅助函数 ====================
@@ -2088,7 +2052,8 @@ class DockerImageViewSet(viewsets.ModelViewSet):
     """Docker镜像管理API"""
     queryset = DockerImage.objects.filter(is_active=True)
     serializer_class = DockerImageSerializer
-    parser_classes = (MultiPartParser, FormParser)
+    permission_classes = [IsAuthenticated]
+    parser_classes = (JSONParser, MultiPartParser, FormParser)
     
     @action(detail=False, methods=['post'])
     def upload(self, request):
@@ -2296,6 +2261,7 @@ class CodePackageViewSet(viewsets.ModelViewSet):
     """代码包管理API"""
     queryset = CodePackage.objects.all()
     serializer_class = CodePackageSerializer
+    permission_classes = [IsAuthenticated]
     parser_classes = (MultiPartParser, FormParser)
     
     @action(detail=False, methods=['post'])
@@ -2312,7 +2278,6 @@ class CodePackageViewSet(viewsets.ModelViewSet):
         - description: 更新说明（可选）
         """
         import hashlib
-        import datetime
         
         uploaded_file = request.FILES.get('file')
         if not uploaded_file:
@@ -2336,9 +2301,9 @@ class CodePackageViewSet(viewsets.ModelViewSet):
         
         try:
             # 保存文件
-            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
             ext = '.tar.gz' if '.tar.gz' in uploaded_file.name or '.tgz' in uploaded_file.name else '.zip'
-            filename = f"{name}_{version}_{timestamp}{ext}"
+            # 显示名称和版本不得参与磁盘路径；UUID 同时避免同秒上传覆盖。
+            filename = f"{uuid.uuid4().hex}{ext}"
             
             upload_dir = os.path.join(settings.MEDIA_ROOT, 'code_packages')
             os.makedirs(upload_dir, exist_ok=True)
@@ -2609,6 +2574,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
     """项目管理API"""
     queryset = Project.objects.all()
     serializer_class = ProjectSerializer
+    permission_classes = [IsAuthenticated]
     
     @action(detail=True, methods=['post'])
     def deploy_to_devices(self, request, pk=None):

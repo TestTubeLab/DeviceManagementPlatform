@@ -3,7 +3,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 
-from .models import Device, FrpServerConfig, Project, ProjectConfig, ProjectDeployment
+from .models import CodePackage, Device, FrpServerConfig, Project, ProjectConfig, ProjectDeployment
 from .views import build_device_id_from_fingerprint
 
 
@@ -385,6 +385,12 @@ class ProjectManagementTests(APITestCase):
         self.assertEqual(response.status_code, 401)
 
     def test_agent_project_deployment_list_only_returns_pending_tasks_for_own_device(self):
+        package = CodePackage.objects.create(
+            name='Contract package', version='v1', size=123,
+            file_path='code_packages/contract.zip', checksum='0123456789abcdef0123456789abcdef',
+        )
+        self.project.code_package = package
+        self.project.save(update_fields=['code_package'])
         ProjectConfig.objects.create(
             project=self.project,
             key='TOKEN',
@@ -418,6 +424,10 @@ class ProjectManagementTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['count'], 1)
         self.assertEqual(response.data['results'][0]['id'], pending.id)
+        self.assertEqual(
+            response.data['results'][0]['project_info']['code_package_info']['checksum'],
+            package.checksum,
+        )
         self.assertEqual(
             response.data['results'][0]['project_info']['configs'][0]['value'],
             'secret-value',

@@ -1,49 +1,44 @@
 # 设备管理平台 - 简化部署镜像
 # 包含 Django后端 + Vue前端 + Nginx
 
+FROM docker:24.0.7-cli AS docker-cli
 FROM python:3.10-slim AS backend-builder
 
 WORKDIR /app
 COPY server/requirements.txt .
-# 使用阿里云PyPI镜像加速
-RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 前端构建阶段
-FROM node:18-alpine AS frontend-builder
+FROM node:22-alpine AS frontend-builder
 
 WORKDIR /app
-# 使用淘宝npm镜像加速
-RUN npm config set registry https://registry.npmmirror.com
 COPY frontend/package*.json ./
-RUN npm ci
+RUN sed -i 's|https://registry.npmmirror.com/|https://registry.npmjs.org/|g' package-lock.json && npm ci
 COPY frontend/ .
 RUN npm run build
 
 # 最终镜像
 FROM python:3.10-slim
 
+ARG DMP_VERSION=dev
+ENV DMP_VERSION=${DMP_VERSION}
+LABEL org.opencontainers.image.version=${DMP_VERSION}
+
 LABEL maintainer="Yanxicoder"
 LABEL description="Device Management Platform - All-in-One"
 
-# 使用阿里云镜像加速，安装必要工具和Docker CLI
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true && \
-    apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx \
     curl \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    # 直接下载 Docker CLI 静态二进制文件
-    && curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/static/stable/x86_64/docker-24.0.7.tgz -o /tmp/docker.tgz \
-    && tar -xzf /tmp/docker.tgz -C /tmp \
-    && mv /tmp/docker/docker /usr/local/bin/ \
-    && rm -rf /tmp/docker /tmp/docker.tgz \
-    && chmod +x /usr/local/bin/docker
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # 复制Python依赖
 COPY --from=backend-builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
 COPY --from=backend-builder /usr/local/bin /usr/local/bin
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 # 复制后端代码
 COPY server/ /app/

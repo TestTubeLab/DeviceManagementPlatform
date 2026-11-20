@@ -49,6 +49,18 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/FrpManage.vue'),
         meta: { title: 'FRP管理', icon: 'Connection' }
       },
+      {
+        path: 'system-logs',
+        name: 'SystemLogs',
+        component: () => import('@/views/SystemLogs.vue'),
+        meta: { title: '系统日志', icon: 'Document' }
+      },
+      {
+        path: 'platform-settings',
+        name: 'PlatformSettings',
+        component: () => import('@/views/PlatformSettings.vue'),
+        meta: { title: '平台设置', icon: 'Setting' }
+      },
     ]
   }
 ]

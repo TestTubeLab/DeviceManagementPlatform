@@ -19,6 +19,11 @@ import requests
 import psutil
 from pathlib import Path
 import logging
+import re
+import selectors
+import stat
+from collections import deque
+from datetime import datetime, timezone
 
 # ==================== 日志配置 ====================
 logging.basicConfig(
@@ -32,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.7.2"  # Agent 版本号，每次更新递增（修复 PLC 配置写入 socket.yml）
+AGENT_VERSION = "1.7.3"  # Bounded journal tasks and business log access.
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
@@ -49,6 +54,7 @@ MIDDLEWARE_LOG_DIR = os.getenv("MIDDLEWARE_LOG_DIR", "/opt/project-code/Middlewa
 FRP_CONFIG_FILE = "/etc/frp/frpc.ini"  # frpc 配置文件路径
 FRP_BINARY_PATH = "/usr/local/bin/frpc"  # frpc 二进制文件路径
 FRP_SERVICE_NAME = "frpc"  # systemd 服务名称
+SSH_MANAGEMENT_ROOT = "/etc/device-agent/ssh-management"
 FRP_LOCAL_CONFIG_VERSION = 0  # 本地配置版本（运行时更新）
 VIRTUAL_INTERFACE_PREFIXES = ('lo', 'docker', 'br-', 'veth', 'virbr', 'flannel', 'cni', 'tunl', 'dummy')
 
@@ -660,6 +666,24 @@ WantedBy=multi-user.target
 
 
 def apply_frp_config(frp_config):
+    """受管设备在同一把锁下进行 FRP 同步；未纳管设备保持原路径。"""
+    if not os.path.lexists(SSH_MANAGEMENT_ROOT):
+        return _apply_frp_config(frp_config)
+    try:
+        from ssh_management import SshManagement
+
+        manager = SshManagement(get_device_id())
+        with manager.lock():
+            result = _apply_frp_config(frp_config, render_guard=manager.render_cloud_config)
+            if result[0]:
+                manager.note_frp_enabled(True)
+            return result
+    except (ImportError, OSError, ValueError) as exc:
+        logger.warning("受管 SSH 的 FRP 配置未写入 (%s)", type(exc).__name__)
+        return False, "受管 SSH 保护不可用；拒绝覆盖本机 FRP 配置"
+
+
+def _apply_frp_config(frp_config, render_guard=None):
     """
     应用 FRP 配置：生成配置文件，启动/重启服务
     返回: (success, error_message)
@@ -674,8 +698,13 @@ def apply_frp_config(frp_config):
         os.makedirs(config_dir, exist_ok=True)
         
         ini_content = render_frpc_ini(frp_config)
-        with open(FRP_CONFIG_FILE, 'w') as f:
-            f.write(ini_content)
+        if render_guard is None:
+            with open(FRP_CONFIG_FILE, 'w') as f:
+                f.write(ini_content)
+        else:
+            from ssh_management import atomic_write
+
+            atomic_write(Path(FRP_CONFIG_FILE), render_guard(ini_content))
         logger.info(f"FRP 配置已写入: {FRP_CONFIG_FILE}")
         
         # 3. 确保 systemd 服务存在
@@ -709,6 +738,23 @@ def apply_frp_config(frp_config):
 
 
 def disable_frp():
+    """平台要求停用时，不允许试登超时重新启动 FRP。"""
+    if not os.path.lexists(SSH_MANAGEMENT_ROOT):
+        return _disable_frp()
+    try:
+        from ssh_management import SshManagement
+
+        manager = SshManagement(get_device_id())
+        with manager.lock():
+            manager.note_frp_enabled(False)
+            return _disable_frp()
+    except (ImportError, OSError, ValueError) as exc:
+        # 即使纳管模块损坏，停用请求也应尽力关闭 FRP，而不是留下暴露入口。
+        logger.warning("无法记录受管 SSH 的 FRP 停用状态 (%s)", type(exc).__name__)
+        return _disable_frp()
+
+
+def _disable_frp():
     """
     停用本地 FRP：停止并禁用 systemd 服务。
     返回: (success, error_message)
@@ -1273,94 +1319,200 @@ def poll_project_deployments():
         logger.error(f"轮询项目部署任务失败: {e}")
         return []
 
-def download_and_extract_code_package(code_package_info, target_dir):
-    """下载并解压代码包"""
+def _code_archive_path(stage, name):
+    """Reject unsafe names on both Linux and Windows before extracting anything."""
+    path = Path(name)
+    if (not name or '\x00' in name or '\\' in name or ':' in name
+            or path.is_absolute() or '..' in path.parts):
+        raise ValueError(f'Unsafe code archive path: {name!r}')
+    destination = stage / path
+    try:
+        destination.resolve().relative_to(stage.resolve())
+    except ValueError:
+        raise ValueError(f'Code archive path escapes staging: {name!r}') from None
+    return destination
+
+
+def _extract_code_archive(archive_path, stage):
+    """Read every regular file fully (including ZIP CRC checks) into private staging."""
     import zipfile
     import tarfile
+    import shutil
+
+    directories = []
+    file_count = 0
+    if zipfile.is_zipfile(archive_path):
+        with zipfile.ZipFile(archive_path) as archive:
+            members = archive.infolist()
+            for member in members:
+                _code_archive_path(stage, member.filename)
+                kind = stat.S_IFMT(member.external_attr >> 16)
+                if kind not in (0, stat.S_IFREG, stat.S_IFDIR):
+                    raise ValueError('Code archives cannot contain links or special files')
+            for member in members:
+                destination = _code_archive_path(stage, member.filename)
+                mode = (member.external_attr >> 16) & 0o777
+                if member.is_dir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    if mode:
+                        directories.append((destination, mode))
+                else:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member) as source, destination.open('wb') as output:
+                        shutil.copyfileobj(source, output)
+                    if mode:
+                        destination.chmod(mode)
+                    file_count += 1
+    else:
+        with tarfile.open(archive_path, 'r:*') as archive:
+            members = archive.getmembers()
+            for member in members:
+                _code_archive_path(stage, member.name)
+                if not (member.isfile() or member.isdir()):
+                    raise ValueError('Code archives cannot contain links or special files')
+            for member in members:
+                destination = _code_archive_path(stage, member.name)
+                if member.isdir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    directories.append((destination, member.mode & 0o777))
+                else:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.extractfile(member) as source, destination.open('wb') as output:
+                        shutil.copyfileobj(source, output)
+                    destination.chmod(member.mode & 0o777)
+                    file_count += 1
+            # Tar end markers may precede the compression trailer; validate it too.
+            while archive.fileobj.read(1024 * 1024):
+                pass
+    if not file_count:
+        raise ValueError('Code archive contains no regular files')
+    # Apply directory permissions last so read-only directories can contain files.
+    for directory, mode in sorted(directories, key=lambda entry: len(entry[0].parts), reverse=True):
+        directory.chmod(mode)
+
+
+def _carry_code_runtime(backup, stage, moved):
+    """Move original runtime inodes into the new tree, recording each move for rollback."""
+    import shutil
+
+    scopes = [backup] + [entry for entry in backup.iterdir()
+                         if entry.is_dir() and not entry.is_symlink()]
+    runtime_paths = []
+    for scope in scopes:
+        runtime_paths.extend([scope / '.env', scope / 'localstore'])
+        server = scope / 'server'
+        if server.is_symlink():
+            raise ValueError('Runtime server directory must not be a symlink')
+        if server.is_dir():
+            runtime_paths.extend(server.glob('db.sqlite3*'))
+    for source in runtime_paths:
+        if not source.exists() and not source.is_symlink():
+            continue
+        destination = stage / source.relative_to(backup)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.is_symlink() or destination.is_file():
+            destination.unlink()
+        elif destination.exists():
+            shutil.rmtree(destination)
+        # Rename keeps live database/log inodes, including the SQLite sidecar files.
+        os.replace(str(source), str(destination))
+        moved.append((source, destination))
+
+
+def download_and_extract_code_package(code_package_info, target_dir):
+    """Stage and validate code, then replace entries with rollback, keeping the mount root."""
     import tempfile
     import shutil
-    
+
     pkg_id = code_package_info.get('id')
     pkg_name = code_package_info.get('name')
     pkg_version = code_package_info.get('version')
-    
     logger.info(f"下载代码包: {pkg_name} ({pkg_version})")
-    
-    # 下载代码包
+    target = Path(target_dir).resolve()
+    if target == target.parent or (target.exists() and not target.is_dir()):
+        raise ValueError('Code target must be a non-root directory')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    workspace = Path(tempfile.mkdtemp(prefix=f'.{target.name}-update-', dir=str(target.parent)))
+    stage = workspace / 'stage'
+    backup = workspace / 'backup'
+    keep_workspace = False
     download_url = f"{CLOUD_SERVER}/code-packages/{pkg_id}/download/"
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.archive') as tmp_file:
-        tmp_path = tmp_file.name
-        
-        try:
-            resp = requests.get(download_url, timeout=300, stream=True)
-            if resp.status_code != 200:
-                raise Exception(f"下载失败: HTTP {resp.status_code}")
-            
-            total_size = int(resp.headers.get('content-length', 0))
-            downloaded = 0
-            
-            for chunk in resp.iter_content(chunk_size=8192):
-                tmp_file.write(chunk)
-                downloaded += len(chunk)
-                if total_size > 0:
-                    progress = int((downloaded / total_size) * 100)
-                    if progress % 20 == 0:
-                        logger.info(f"下载进度: {progress}%")
-            
-            logger.info(f"代码包下载完成: {downloaded} bytes")
-        except Exception as e:
-            os.unlink(tmp_path)
-            raise Exception(f"下载代码包失败: {e}")
-    
-    # 确保目标目录存在
-    os.makedirs(target_dir, exist_ok=True)
-    
-    # 清空目标目录（保留.env配置文件）- 增强错误处理
-    logger.info(f"清理目标目录: {target_dir}")
-    for item in os.listdir(target_dir):
-        item_path = os.path.join(target_dir, item)
-        if item == '.env':  # 保留配置文件
-            continue
-        
-        try:
-            if os.path.isdir(item_path):
-                # 如果是目录，使用shutil.rmtree强制删除
-                shutil.rmtree(item_path, ignore_errors=True)
-                # 验证是否删除成功
-                if os.path.exists(item_path):
-                    # 如果还存在，尝试修改权限后再删除
-                    import stat
-                    os.chmod(item_path, stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
-                    shutil.rmtree(item_path)
-            else:
-                os.remove(item_path)
-            logger.debug(f"  已删除: {item}")
-        except Exception as e:
-            logger.warning(f"  删除失败 {item}: {e}，尝试继续...")
-            # 不阻塞部署，继续处理其他文件
-    
-    # 解压代码包
     try:
-        # 尝试作为zip解压
-        if zipfile.is_zipfile(tmp_path):
-            logger.info("解压ZIP文件...")
-            with zipfile.ZipFile(tmp_path, 'r') as zip_ref:
-                zip_ref.extractall(target_dir)
-        # 尝试作为tar.gz解压
-        elif tarfile.is_tarfile(tmp_path):
-            logger.info("解压TAR文件...")
-            with tarfile.open(tmp_path, 'r:*') as tar_ref:
-                tar_ref.extractall(target_dir)
-        else:
-            raise Exception("不支持的压缩格式")
-        
+        stage.mkdir()
+        archive_path = workspace / 'package.archive'
+        checksum = str(code_package_info.get('checksum') or '').lower()
+        if checksum and not re.fullmatch(r'(?:[0-9a-f]{32}|[0-9a-f]{64})', checksum):
+            raise ValueError('Invalid code package checksum')
+        digest = hashlib.sha256() if len(checksum) == 64 else hashlib.md5()
+        try:
+            with requests.get(download_url, timeout=300, stream=True,
+                              headers={'Accept-Encoding': 'identity'}) as resp:
+                if resp.status_code != 200:
+                    raise ValueError(f"下载失败: HTTP {resp.status_code}")
+                total_size = resp.headers.get('content-length')
+                downloaded = 0
+                with archive_path.open('wb') as output:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        output.write(chunk)
+                        digest.update(chunk)
+                        downloaded += len(chunk)
+                if total_size is not None and downloaded != int(total_size):
+                    raise ValueError('Code package Content-Length mismatch')
+                if code_package_info.get('size') is not None and downloaded != int(code_package_info['size']):
+                    raise ValueError('Code package size mismatch')
+                if checksum and digest.hexdigest() != checksum:
+                    raise ValueError('Code package checksum mismatch')
+        except Exception as exc:
+            raise RuntimeError(f'Code package download failed: {exc}') from exc
+        logger.info(f"代码包下载完成: {downloaded} bytes")
+        _extract_code_archive(archive_path, stage)
+        target.mkdir(exist_ok=True)
+        backup.mkdir()
+        saved = []
+        installed = []
+        runtime_moves = []
+        try:
+            # Keep the bind-mounted root inode; only its top-level entries move.
+            for entry in list(target.iterdir()):
+                os.replace(str(entry), str(backup / entry.name))
+                saved.append(entry.name)
+            _carry_code_runtime(backup, stage, runtime_moves)
+            for entry in list(stage.iterdir()):
+                os.replace(str(entry), str(target / entry.name))
+                installed.append(entry.name)
+        except BaseException:
+            # Also roll back an interrupt before finally can clean up the backup.
+            rollback_errors = []
+            for name in reversed(installed):
+                try:
+                    os.replace(str(target / name), str(stage / name))
+                except OSError as exc:
+                    rollback_errors.append(str(exc))
+            for source, destination in reversed(runtime_moves):
+                try:
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(str(destination), str(source))
+                except OSError as exc:
+                    rollback_errors.append(str(exc))
+            for name in saved:
+                try:
+                    original = backup / name
+                    if original.exists() or original.is_symlink():
+                        os.replace(str(original), str(target / name))
+                except OSError as exc:
+                    rollback_errors.append(str(exc))
+            if rollback_errors:
+                keep_workspace = True
+                raise RuntimeError(f'Code rollback incomplete; backup retained at {backup}')
+            raise
         logger.info(f"代码解压完成: {target_dir}")
+        return True
     finally:
-        # 清理临时文件
-        os.unlink(tmp_path)
-    
-    return True
+        if not keep_workspace:
+            try:
+                shutil.rmtree(workspace)
+            except OSError:
+                logger.warning(f'Code package staging cleanup failed: {workspace}')
 
 
 def execute_project_restart(deployment):
@@ -2065,6 +2217,261 @@ def check_and_apply_config(device_id):
         logger.warning(f"检查配置时出错: {e}")
 
 # ==================== 日志管理功能 ====================
+MAX_LOG_LINES = 2000
+MAX_LOG_TEXT_BYTES = 512 * 1024
+MAX_LOG_SCAN_BYTES = 16 * 1024 * 1024
+MAX_LOG_ARCHIVE_BYTES = 16 * 1024 * 1024
+LOG_SCAN_SECONDS = 5
+JOURNAL_TIMEOUT_SECONDS = 15
+JOURNAL_PRIORITIES = {'DEBUG': 7, 'INFO': 6, 'WARNING': 4, 'ERROR': 3, 'CRITICAL': 2}
+
+
+def _log_date(value):
+    """Validate a calendar date before using it as a path component."""
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', value):
+        raise ValueError('date must use YYYY-MM-DD')
+    datetime.strptime(value, '%Y-%m-%d')
+    return value
+
+
+def _log_path(date, filename=None):
+    """Resolve both directory and file symlinks within the configured log root."""
+    root = Path(MIDDLEWARE_LOG_DIR).resolve()
+    directory = (root / _log_date(date)).resolve()
+    try:
+        directory.relative_to(root)
+    except ValueError:
+        raise ValueError('Log date directory escapes the log root') from None
+    if filename is None:
+        return directory
+    if (not isinstance(filename, str) or not filename or filename in ('.', '..')
+            or any(c in filename for c in '/\\:\x00')):
+        raise ValueError('file must be a basename without paths')
+    path = (directory / filename).resolve()
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        raise ValueError('Log file escapes the date directory') from None
+    return path
+
+
+def _log_budget():
+    return {'deadline': time.monotonic() + LOG_SCAN_SECONDS,
+            'remaining': MAX_LOG_SCAN_BYTES, 'entries': 4096,
+            'names': MAX_LOG_TEXT_BYTES, 'truncated': False}
+
+
+def _log_entries(directory, budget):
+    """Bound directory enumeration across the entire task, including sorting."""
+    entries = []
+    with os.scandir(directory) as iterator:
+        for entry in iterator:
+            budget['entries'] -= 1
+            budget['names'] -= len(entry.name.encode('utf-8'))
+            if (budget['entries'] < 0 or budget['names'] < 0
+                    or time.monotonic() >= budget['deadline']):
+                raise ValueError('Log directory scan limit reached; select a narrower date')
+            entries.append(entry.name)
+    return sorted(entries)
+
+
+def _log_dates(budget):
+    dates = []
+    for name in _log_entries(MIDDLEWARE_LOG_DIR, budget):
+        if time.monotonic() >= budget['deadline']:
+            raise ValueError('Log directory scan timed out; select a narrower date')
+        try:
+            directory = _log_path(name)
+        except ValueError:
+            continue
+        if directory.is_dir():
+            dates.append(name)
+    return dates
+
+
+def _log_files(date, budget):
+    files = []
+    for name in _log_entries(_log_path(date), budget):
+        if time.monotonic() >= budget['deadline']:
+            raise ValueError('Log directory scan timed out; select a narrower date')
+        try:
+            path = _log_path(date, name)
+        except ValueError:
+            continue
+        if path.is_file():
+            files.append(name)
+    return files
+
+
+def _open_log(path):
+    # O_NONBLOCK prevents a replaced FIFO from blocking; only regular files are read.
+    flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError('Only regular log files can be read')
+        return os.fdopen(fd, 'rb')
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _log_lines(handle, budget):
+    """Yield bounded physical lines, discarding oversized line suffixes safely."""
+    while budget['remaining'] > 0 and time.monotonic() < budget['deadline']:
+        raw = handle.readline(min(MAX_LOG_TEXT_BYTES, budget['remaining']))
+        if not raw:
+            return
+        budget['remaining'] -= len(raw)
+        # A single huge line must not become many apparent log entries.
+        if not raw.endswith(b'\n') and len(raw) == MAX_LOG_TEXT_BYTES:
+            budget['truncated'] = True
+            while budget['remaining'] > 0 and time.monotonic() < budget['deadline']:
+                suffix = handle.readline(min(65536, budget['remaining']))
+                budget['remaining'] -= len(suffix)
+                if not suffix or suffix.endswith(b'\n'):
+                    break
+        yield raw.decode('utf-8', errors='ignore')
+    budget['truncated'] = True
+
+
+def _log_line_limit(value, allow_zero=False):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError('lines must be a positive integer')
+    if value == 0:
+        if not allow_zero:
+            raise ValueError('lines must be a positive integer')
+        return MAX_LOG_LINES
+    return min(value, MAX_LOG_LINES)
+
+
+def _journal_time(value):
+    """Accept ISO datetimes only, never journalctl's relative/epoch expressions."""
+    pattern = r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})?'
+    if not isinstance(value, str) or not re.fullmatch(pattern, value):
+        raise ValueError('start_time/end_time must be ISO datetimes with seconds')
+    return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(timezone.utc)
+
+
+def _bounded_log_process(args, deadline):
+    """Drain both pipes incrementally; kill and reap on deadline or byte limit."""
+    output = {'stdout': bytearray(), 'stderr': bytearray()}
+    truncated = False
+    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               stdin=subprocess.DEVNULL, shell=False, bufsize=0,
+                               env={**os.environ, 'LC_ALL': 'C', 'SYSTEMD_COLORS': '0'})
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+            selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+            remaining = MAX_LOG_TEXT_BYTES
+            while selector.get_map():
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    raise subprocess.TimeoutExpired(args, JOURNAL_TIMEOUT_SECONDS)
+                for key, _ in selector.select(timeout):
+                    chunk = os.read(key.fileobj.fileno(), min(8192, remaining + 1))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    output[key.data].extend(chunk[:remaining])
+                    remaining -= min(len(chunk), remaining)
+                    if remaining == 0:
+                        truncated = True
+                        break
+                if truncated:
+                    break
+        if truncated:
+            process.kill()
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        return (bytes(output['stdout']), bytes(output['stderr']),
+                process.returncode, truncated)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=1)
+        process.stdout.close()
+        process.stderr.close()
+
+
+def collect_journal_logs(params):
+    """Collect a bounded recent journal window from a fixed source whitelist."""
+    try:
+        allowed = {'source', 'start_time', 'end_time', 'lines', 'level', 'keyword'}
+        if not isinstance(params, dict) or set(params) - allowed:
+            raise ValueError('journal accepts source, start_time, end_time, lines, level, keyword only')
+        source = params.get('source')
+        frpc_unit = FRP_SERVICE_NAME[:-8] if FRP_SERVICE_NAME.endswith('.service') else FRP_SERVICE_NAME
+        units = {'agent': 'device-agent.service', 'frpc': f'{frpc_unit}.service',
+                 'docker': 'docker.service', 'system': None}
+        if not isinstance(source, str) or source not in units:
+            raise ValueError('source must be agent, frpc, docker or system')
+        lines = _log_line_limit(params.get('lines', 500))
+        level = params.get('level')
+        if level == '':
+            level = None  # The platform serializer accepts blank as "all levels".
+        if level is not None and (not isinstance(level, str) or level not in JOURNAL_PRIORITIES):
+            raise ValueError('level must be DEBUG, INFO, WARNING, ERROR or CRITICAL')
+        keyword = params.get('keyword', '')
+        if not isinstance(keyword, str) or len(keyword) > 1024:
+            raise ValueError('keyword must be a string of at most 1024 characters')
+        start = _journal_time(params['start_time']) if params.get('start_time') is not None else None
+        end = _journal_time(params['end_time']) if params.get('end_time') is not None else None
+        if start and end and start > end:
+            raise ValueError('start_time must not be after end_time')
+        # Keep diagnostics enabled: --quiet hides unavailable-journal warnings.
+        args = ['journalctl', '--no-pager', '--output=short-iso',
+                '--reverse', f'--lines={lines}']
+        unit = units[source]
+        if unit:
+            args.append(f'--unit={unit}')
+        for flag, value in (('since', start), ('until', end)):
+            if value:
+                timestamp = value.replace(tzinfo=None).isoformat(sep=' ', timespec='microseconds')
+                args.append(f'--{flag}={timestamp} UTC')
+        if level:
+            priority = JOURNAL_PRIORITIES[level]
+            args.append(f'--priority={priority}..{priority}')
+        deadline = time.monotonic() + JOURNAL_TIMEOUT_SECONDS
+        if unit:
+            state, error, code, clipped = _bounded_log_process(
+                ['systemctl', 'show', '--property=LoadState', '--value', unit], deadline)
+            if state.strip() == b'not-found':
+                return {'error': f'Service {unit} is absent; install/check the service on this device'}
+            if code or clipped or state.strip() not in (b'loaded', b'masked', b'error', b'bad-setting', b'merged'):
+                return {'error': 'Service lookup unavailable; check systemd and service permissions on the host'}
+        raw, diagnostic, code, truncated = _bounded_log_process(args, deadline)
+        diagnostic = diagnostic.decode('utf-8', errors='replace')
+        if any(word in diagnostic.lower() for word in (
+                'permission denied', 'insufficient permissions', 'access denied',
+                'not seeing messages from')):
+            return {'error': 'Journal permission denied; grant the Agent journal access (root or systemd-journal group)'}
+        if 'no journal files' in diagnostic.lower():
+            return {'error': 'Journal unavailable; check systemd-journald and journal storage on the host'}
+        if code and not truncated:
+            return {'error': f'journalctl failed; check journal access/storage: {diagnostic[:1000].strip()}'}
+        # --reverse keeps the newest data if the byte cap is reached. Return chronological order.
+        text = raw.decode('utf-8', errors='ignore')
+        window = [line for line in text.splitlines() if not line.startswith('-- ')]
+        truncated = truncated or len(window) > lines
+        window = window[:lines]
+        if keyword:
+            window = [line for line in window if keyword in line]
+        window.reverse()
+        content = '\n'.join(window)
+        return {'content': content, 'returned_lines': len(window),
+                'truncated': truncated, 'source': source,
+                'collected_at': datetime.now(timezone.utc).isoformat()}
+    except subprocess.TimeoutExpired:
+        return {'error': 'Journal collection timed out after 15 seconds; narrow the time range or line count'}
+    except FileNotFoundError as exc:
+        return {'error': f'Journal unavailable ({exc.filename or "journalctl/systemctl"} missing); use a Linux systemd host'}
+    except PermissionError:
+        return {'error': 'Journal permission denied; check journalctl/systemctl executable and journal access'}
+    except (ValueError, OSError) as exc:
+        return {'error': str(exc)}
+
+
 def list_log_files(params):
     """
     列出日志文件
@@ -2072,30 +2479,30 @@ def list_log_files(params):
     返回: {"dates": [...], "files": {"2025-12-10": [...]}}
     """
     try:
+        budget = _log_budget()
         log_dir = Path(MIDDLEWARE_LOG_DIR)
         if not log_dir.exists():
             return {"error": f"Log directory not found: {MIDDLEWARE_LOG_DIR}"}
         
         target_date = params.get('date')
         
-        if target_date:
+        if target_date is not None:
             # 列出指定日期的文件
-            date_dir = log_dir / target_date
+            date_dir = _log_path(target_date)
             if not date_dir.exists():
                 return {"dates": [], "files": {}}
             
-            files = sorted([f.name for f in date_dir.iterdir() if f.is_file()])
+            files = _log_files(target_date, budget)
             return {
                 "dates": [target_date],
                 "files": {target_date: files}
             }
         else:
             # 列出所有日期
-            dates = sorted([d.name for d in log_dir.iterdir() if d.is_dir()], reverse=True)
+            dates = list(reversed(_log_dates(budget)))
             files = {}
             for date in dates[:30]:  # 只返回最近30天
-                date_dir = log_dir / date
-                files[date] = sorted([f.name for f in date_dir.iterdir() if f.is_file()])
+                files[date] = _log_files(date, budget)
             
             return {
                 "dates": dates[:30],
@@ -2114,39 +2521,50 @@ def read_log_file(params):
     try:
         date = params.get('date')
         file = params.get('file')
-        lines = params.get('lines', 0)
+        lines = _log_line_limit(params.get('lines', 0), allow_zero=True)
         tail = params.get('tail', False)
         
         if not date or not file:
             return {"error": "Missing required parameters: date and file"}
         
-        log_file = Path(MIDDLEWARE_LOG_DIR) / date / file
+        log_file = _log_path(date, file)
         if not log_file.exists():
             return {"error": f"Log file not found: {date}/{file}"}
         
-        # 读取文件
-        with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
-            all_lines = f.readlines()
-        
-        total_lines = len(all_lines)
-        
-        # 根据参数返回内容
-        if lines > 0:
-            if tail:
-                # 从尾部读取
-                selected_lines = all_lines[-lines:]
-            else:
-                # 从头部读取
-                selected_lines = all_lines[:lines]
-        else:
-            selected_lines = all_lines
-        
+        budget = _log_budget()
+        selected_lines = deque()
+        selected_bytes = 0
+        total_lines = 0
+        truncated = False
+        with _open_log(log_file) as handle:
+            size = os.fstat(handle.fileno()).st_size
+            if tail and size > MAX_LOG_SCAN_BYTES:
+                handle.seek(size - MAX_LOG_SCAN_BYTES)
+                # Discard the first partial line in the bounded tail window.
+                next(_log_lines(handle, budget), None)
+                truncated = True
+            for line in _log_lines(handle, budget):
+                total_lines += 1
+                length = len(line.encode('utf-8'))
+                if tail:
+                    selected_lines.append(line)
+                    selected_bytes += length
+                    while len(selected_lines) > lines or selected_bytes > MAX_LOG_TEXT_BYTES:
+                        selected_bytes -= len(selected_lines.popleft().encode('utf-8'))
+                        truncated = True
+                elif not truncated and len(selected_lines) < lines and selected_bytes + length <= MAX_LOG_TEXT_BYTES:
+                    selected_lines.append(line)
+                    selected_bytes += length
+                else:
+                    truncated = True
         content = ''.join(selected_lines)
         
         return {
             "content": content,
             "total_lines": total_lines,
-            "returned_lines": len(selected_lines)
+            "returned_lines": len(selected_lines),
+            "truncated": truncated or budget['truncated'],
+            "total_lines_exact": not budget['truncated'] and not (tail and size > MAX_LOG_SCAN_BYTES)
         }
     except Exception as e:
         logger.error(f"Failed to read log file: {e}")
@@ -2169,17 +2587,30 @@ def search_logs(params):
         start_date = params.get('start_date')
         end_date = params.get('end_date')
         level = params.get('level')
+        if level == '':
+            level = None
         case_sensitive = params.get('case_sensitive', False)
         
         if not keyword:
             return {"error": "Missing required parameter: keyword"}
+        if not isinstance(keyword, str) or len(keyword) > 1024:
+            raise ValueError('keyword must be a string of at most 1024 characters')
+        if level is not None and (not isinstance(level, str) or level not in JOURNAL_PRIORITIES):
+            raise ValueError('level must be DEBUG, INFO, WARNING, ERROR or CRITICAL')
+        if start_date is not None:
+            _log_date(start_date)
+        if end_date is not None:
+            _log_date(end_date)
+        if start_date and end_date and start_date > end_date:
+            raise ValueError('start_date must not be after end_date')
+        budget = _log_budget()
         
         log_dir = Path(MIDDLEWARE_LOG_DIR)
         if not log_dir.exists():
             return {"error": f"Log directory not found: {MIDDLEWARE_LOG_DIR}"}
         
         # 确定搜索日期范围
-        all_dates = sorted([d.name for d in log_dir.iterdir() if d.is_dir()])
+        all_dates = _log_dates(budget)
         if start_date:
             all_dates = [d for d in all_dates if d >= start_date]
         if end_date:
@@ -2187,42 +2618,43 @@ def search_logs(params):
         
         matches = []
         total_matches = 0
+        returned_bytes = 0
         
         # 搜索关键词（支持大小写）
         search_keyword = keyword if case_sensitive else keyword.lower()
         
         for date in all_dates[-7:]:  # 只搜索最近7天，避免耗时过长
-            date_dir = log_dir / date
-            for log_file in sorted(date_dir.iterdir()):
-                if not log_file.is_file():
-                    continue
-                
-                try:
-                    with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
-                        for line_num, line in enumerate(f, 1):
-                            # 级别过滤
-                            if level and f'[{level}]' not in line:
-                                continue
-                            
-                            # 关键词匹配
-                            search_line = line if case_sensitive else line.lower()
-                            if search_keyword in search_line:
-                                total_matches += 1
-                                if len(matches) < 500:  # 最多返回500条
-                                    matches.append({
-                                        "date": date,
-                                        "file": log_file.name,
-                                        "line_num": line_num,
-                                        "content": line.strip()
-                                    })
-                except Exception as e:
-                    logger.debug(f"读取文件失败 {log_file}: {e}")
-                    continue
+            for name in _log_files(date, budget):
+                log_file = _log_path(date, name)
+                with _open_log(log_file) as f:
+                    for line_num, line in enumerate(_log_lines(f, budget), 1):
+                        if level and f'[{level}]' not in line:
+                            continue
+                        search_line = line if case_sensitive else line.lower()
+                        if search_keyword in search_line:
+                            total_matches += 1
+                            length = len(line.encode('utf-8'))
+                            if len(matches) < 500 and returned_bytes + length <= MAX_LOG_TEXT_BYTES:
+                                matches.append({
+                                    "date": date,
+                                    "file": name,
+                                    "line_num": line_num,
+                                    "content": line.strip()
+                                })
+                                returned_bytes += length
+                            else:
+                                budget['truncated'] = True
+                                break
+                if budget['truncated']:
+                    break
+            if budget['truncated']:
+                break
         
         return {
             "matches": matches,
             "total_matches": total_matches,
-            "returned_matches": len(matches)
+            "returned_matches": len(matches),
+            "truncated": budget['truncated']
         }
     except Exception as e:
         logger.error(f"Failed to search logs: {e}")
@@ -2244,18 +2676,43 @@ def download_log_files(params):
         
         if not date or not files:
             return {"error": "Missing required parameters: date and files"}
+        if not isinstance(files, list) or len(files) > 100:
+            raise ValueError('files must be a list of at most 100 basenames')
         
-        log_dir = Path(MIDDLEWARE_LOG_DIR) / date
+        log_dir = _log_path(date)
         if not log_dir.exists():
             return {"error": f"Log directory not found: {date}"}
         
-        # 创建zip文件（内存中）
+        budget = _log_budget()
+        paths = [(name, _log_path(date, name)) for name in dict.fromkeys(files)]
+        total_size = 0
+        for _, path in paths:
+            if time.monotonic() >= budget['deadline']:
+                raise ValueError('Log download scan timed out; select fewer/smaller files')
+            if path.exists():
+                total_size += path.stat().st_size
+            if total_size > MAX_LOG_ARCHIVE_BYTES:
+                raise ValueError('Log download exceeds 16 MiB; select fewer/smaller files')
+        # Stream source files; bound raw data as well as compressed archive size.
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for file_name in files:
-                file_path = log_dir / file_name
+            for file_name, file_path in paths:
                 if file_path.exists():
-                    zip_file.write(file_path, arcname=file_name)
+                    with _open_log(file_path) as source, zip_file.open(file_name, 'w') as target:
+                        while True:
+                            if time.monotonic() >= budget['deadline']:
+                                raise ValueError('Log download scan timed out; select fewer/smaller files')
+                            chunk = source.read(min(65536, budget['remaining'] + 1))
+                            if not chunk:
+                                break
+                            budget['remaining'] -= len(chunk)
+                            if budget['remaining'] < 0:
+                                raise ValueError('Log download exceeds 16 MiB; select fewer/smaller files')
+                            target.write(chunk)
+                            if zip_buffer.tell() > MAX_LOG_ARCHIVE_BYTES:
+                                raise ValueError('Log archive exceeds 16 MiB; select fewer/smaller files')
+        if zip_buffer.tell() > MAX_LOG_ARCHIVE_BYTES:
+            raise ValueError('Log archive exceeds 16 MiB; select fewer/smaller files')
         
         # 转为base64
         zip_buffer.seek(0)
@@ -2278,6 +2735,7 @@ def poll_and_execute_log_tasks():
         # 轮询待执行的日志任务
         resp = requests.get(
             f"{CLOUD_SERVER}/devices/{device_id}/pending_log_tasks/",
+            params={'limit': 1},
             timeout=10
         )
         
@@ -2310,6 +2768,8 @@ def poll_and_execute_log_tasks():
                     result = search_logs(params)
                 elif task_type == 'download':
                     result = download_log_files(params)
+                elif task_type == 'journal':
+                    result = collect_journal_logs(params)
                 else:
                     result = {"error": f"Unknown task type: {task_type}"}
                 
@@ -2362,6 +2822,17 @@ def poll_and_execute_log_tasks():
 # ==================== 主循环 ====================
 def main():
     device_id = get_device_id()
+    if os.path.lexists(os.path.join(SSH_MANAGEMENT_ROOT, 'enrollment.json')):
+        try:
+            from threading import Thread
+            from ssh_management import SshManagement
+
+            ssh_manager = SshManagement(device_id, CLOUD_SERVER)
+            Thread(
+                target=ssh_manager.run_poll_loop, args=(logger,), daemon=True, name='device-ssh-management',
+            ).start()
+        except (ImportError, OSError, ValueError) as exc:
+            logger.warning("SSH 管理未启动 (%s)，原有设备功能保持运行", type(exc).__name__)
     logger.info("=" * 60)
     logger.info(f"Device Agent 启动")
     logger.info(f"设备ID: {device_id}")

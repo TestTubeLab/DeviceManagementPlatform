@@ -27,6 +27,8 @@ request.interceptors.response.use(
     return response.data
   },
   (error) => {
+    // Navigating away from a cancellable request is a normal lifecycle event.
+    if (axios.isCancel(error)) return Promise.reject(error)
     const status = error.response?.status
     
     if (status === 401) {

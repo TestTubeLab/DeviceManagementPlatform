@@ -113,7 +113,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { getProjectDeployments, type ProjectDeployment } from '@/api/project'
 import {
@@ -126,7 +126,8 @@ import dayjs from 'dayjs'
 const loading = ref(false)
 const deployments = ref<ProjectDeployment[]>([])
 const showDetailDialog = ref(false)
-const currentDeployment = ref<ProjectDeployment | null>(null)
+const currentDeploymentId = ref<number | null>(null)
+const currentDeployment = computed(() => deployments.value.find(item => item.id === currentDeploymentId.value) || null)
 
 const loadDeployments = async () => {
   loading.value = true
@@ -157,7 +158,7 @@ const formatTime = (time: string) => {
 }
 
 const viewDetail = (deployment: ProjectDeployment) => {
-  currentDeployment.value = deployment
+  currentDeploymentId.value = deployment.id
   showDetailDialog.value = true
 }
 

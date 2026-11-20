@@ -81,6 +81,8 @@ curl -fsSL http://服务器IP:8081/api/install.sh | sudo bash
 
 ## 🔧 技术栈
 
+系统日志的页面、API、保留策略及升级步骤见 [系统日志说明](docs/SYSTEM_LOGS.md)。
+
 | 层级 | 技术 |
 |------|------|
 | 前端 | Vue 3 + TypeScript + Element Plus + Vite |
@@ -131,6 +133,8 @@ curl -fsSL http://服务器IP:8081/api/install.sh | sudo bash
 - 部署历史记录
 
 ## 📖 文档
+
+- [平台在线更新](deployment/updater/README.md) - GitHub 发版、平台设置、部署与回滚
 
 - [云部署指南](CLOUD_DEPLOY_GUIDE.md) - 服务器部署步骤
 - [API文档](docs/API.md) - RESTful API参考

@@ -1,5 +1,9 @@
 # Device Agent 说明文档
 
+当前 Agent 版本：`1.7.3`。本版本新增有界 journal 日志任务，并限制业务日志访问范围和资源消耗；不新增运行依赖。
+
+新增日志功能保持 Python 3.8 兼容，路径包含关系和服务名后缀处理不依赖 Python 3.9 API。测试覆盖这些旧 API 边界；Python 3.8 语法解析检查不能替代目标设备的实际运行验证。
+
 ## 1. 这是什么
 
 `device-agent` 是运行在边缘设备上的常驻代理程序，定位不是“被别人直接调用的服务端接口”，而是一个**主动向云端拉取任务、主动向云端上报状态的客户端 Agent**。
@@ -325,6 +329,19 @@ MiddlewareServer/setup-browser.sh
 
 Agent 会把它当作宿主机部署后钩子执行。
 
+#### 代码包校验、运行数据与失败回滚（1.7.3）
+
+入口 `download_and_extract_code_package(code_package_info, target_dir)` 沿用 ZIP/TAR 的原始目录层级，不剥离顶层项目目录。下载和解压使用 `target_dir` 同父目录下的私有暂存目录；完整读取归档并通过 ZIP CRC / TAR 读取与压缩尾部校验后才开始替换。校验实际下载字节数与 `Content-Length`；元数据提供精确 `size` 或 MD5/SHA-256 `checksum` 时也校验，不将四舍五入的 `size_mb` 用于校验。拒绝空归档、绝对路径、`..`、Windows 路径、链接和特殊文件。
+
+保留挂载根目录 `target_dir` 本身，仅备份和替换其顶层条目。归档校验完成后，先将旧条目移入同文件系统备份区，再把以下原始运行数据移动到待激活目录，保留文件/目录 inode；不使用仍在运行的 SQLite 数据库副本：
+
+- 根目录 `.env`、`localstore`、`server/db.sqlite3*`。
+- 每个顶层项目目录中的 `.env`、`localstore`、`server/db.sqlite3*`，包括数据库的 WAL、SHM 和 journal 文件。
+
+包内同名运行数据由旧数据覆盖；`config/*.yml`、模型和插件配置仍按新包更新。归档保留普通权限位及可执行位，忽略所有者和特殊权限位。暂存解压时空间不足或校验失败不改动旧目录；条目替换失败则逆序归还运行数据并恢复备份。回滚本身失败时保留暂存/备份目录，在错误中返回恢复路径，供人工检查；不继续后续容器重启步骤。
+
+该流程没有暂停业务进程，多条目切换仍有短暂路径间隙，不是完整的并发更新或数据库事务保证。正常完成或成功回滚后清理暂存目录；空间需求包含下载归档和新代码树。验证入口是 `device-agent/tests/test_code_packages.py`，覆盖真实归档、校验失败、运行数据 inode、配置更新及替换失败回滚。
+
 ---
 
 ### 7.5 配置下发
@@ -369,6 +386,7 @@ Agent 会把它当作宿主机部署后钩子执行。
 - `read`：读取单个日志文件
 - `search`：按关键词搜索
 - `download`：把日志打包后回传
+- `journal`：读取宿主机 systemd journal 的最近日志窗口（Agent 1.7.3 起）
 
 默认日志目录：
 
@@ -377,6 +395,91 @@ Agent 会把它当作宿主机部署后钩子执行。
 ```
 
 除此之外，Agent 还会定时上传 `middleware` 容器日志片段，属于另一条“主动上报”链路。
+
+Agent 1.7.3 领取日志任务时发送 `limit=1`，配合支持该参数的平台每轮只领取一项，避免批量日志采集和结果上报长时间占用主循环。平台应先升级以支持该参数；旧 Agent 不传参数时仍默认每轮最多领取五项。
+
+#### journal 任务接口（1.7.3）
+
+沿用上面的任务拉取和结果回传接口，不增加 Agent 监听端口。平台负责创建任务和访问权限；Agent 只执行固定日志采集能力。拉取响应中的任务示例：
+
+```json
+{
+  "task_id": "example-journal-task",
+  "task_type": "journal",
+  "params": {
+    "source": "agent",
+    "start_time": "2026-11-18T08:00:00+08:00",
+    "end_time": "2026-11-18T09:00:00+08:00",
+    "lines": 500,
+    "level": "INFO",
+    "keyword": "heartbeat"
+  }
+}
+```
+
+| 参数 | 约束和含义 |
+| --- | --- |
+| `source` | 必填，严格限定 `agent`、`frpc`、`docker`、`system` |
+| `start_time` / `end_time` | 可选，ISO 日期时间，必须有秒；可带 1-6 位小数、`Z` 或 `+08:00` 等时区。无时区时按设备本地时区解释，再转 UTC。起始不得晚于结束 |
+| `lines` | 正整数，默认 500，超过 2000 按 2000；不接受 0、负数、布尔或字符串 |
+| `level` | 可选，空字符串或省略表示全部；非空值严格限定 `DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL`；精确匹配 journal PRIORITY，依次为 7、6、4、3、2，不按消息文本识别级别，也不自动包含更严重级别 |
+| `keyword` | 可选，最多 1024 字符，区分大小写的字面子串；只在时间、级别过滤后的最近 `lines` 条窗口内匹配，不扫描窗口以外的历史日志 |
+
+来源固定映射：`agent` -> `device-agent.service`；`frpc` -> 现有 `FRP_SERVICE_NAME` 对应的 `.service`（当前 `frpc.service`）；`docker` -> `docker.service`；`system` 不指定 unit。`docker` 是 Docker 守护进程日志，业务容器日志仍使用既有上传链路。
+
+不接受自定义 unit、文件路径、命令、额外参数、相对时间或 `@epoch` 时间表达式。子进程只用参数数组执行 `systemctl show` 和 `journalctl`，不使用 shell。时间和级别先校验再组装参数，关键词不会传入命令。unit 存在性检查和 journal 采集共享 15 秒截止时间，超时终止并回收子进程。
+
+stdout/stderr 增量读取，合计最多保留 512 KiB，达到上限终止采集并标记 `truncated`；UTF-8 内容不超过 512 KiB、最多 2000 行。先从最新日志开始采集，再按时间顺序返回，达到字节上限时保留最新窗口。`truncated=false` 仅表示请求窗口完整，窗口前仍可能存在更早日志。
+
+采集成功的 helper 返回以下字段；轮询器将其放进 `report_log_task` 的 `result`，并设置 `status=completed`：
+
+```json
+{
+  "content": "2026-11-18T08:30:00+0800 device agent[123]: heartbeat sent",
+  "returned_lines": 1,
+  "truncated": false,
+  "source": "agent",
+  "collected_at": "2026-11-18T01:00:01+00:00"
+}
+```
+
+有效 journal 中没有匹配日志时成功返回空 `content`、`returned_lines=0`。没有 journal 文件/工具、journal 权限不足、服务不存在、systemd 不可用、执行失败和超时分别给出可操作的 `{"error": "..."}`。轮询器沿用原失败契约：`status=failed`、`result={}`、`error_message` 为该错误说明。journal 依赖 Linux/systemd 和 Agent 用户的 journal 读取权限（通常 root 或 `systemd-journal` 组）；不会为采集任务自动启停服务或修改权限。
+
+#### 既有业务日志任务的边界
+
+`list/read/search/download` 的原参数和结果字段保留，路径以 `MIDDLEWARE_LOG_DIR` 为根。日期必须为有效日历日期 `YYYY-MM-DD`，文件只能是 basename；拒绝绝对路径、斜杠、反斜杠、盘符/流名称和目录穿越。解析日期目录和文件的 symlink 后检查包含关系，逃出日志根/日期目录的条目不列出、不搜索，直接读取/下载时报错。只读取普通文件。
+
+| 任务 | 上限与结果语义 |
+| --- | --- |
+| `list` | 保留最近 30 个日期；每任务目录枚举总计最多 4096 条、名称合计 512 KiB、5 秒，超限返回错误并要求缩小日期范围 |
+| `read` | 最多 2000 行、512 KiB 文本；兼容原 `lines=0`/省略，现表示有界读取上限。扫描最多 16 MiB/5 秒，`tail=true` 对大文件从末尾 16 MiB 开始。新增 `truncated` 和 `total_lines_exact`；未完整扫描时 `total_lines` 是扫描窗口计数，不是全文件总数 |
+| `search` | 保留原最近 7 天、级别和大小写规则；最多返回 500 条、512 KiB 文本；所有文件合计扫描最多 16 MiB/5 秒。超限返回 `truncated=true`，此时 `total_matches` 是已扫描匹配计数，不是全历史总数 |
+| `download` | 最多 100 个文件；总源文件及 ZIP 各最多 16 MiB，增量打包，读取期间继续检查增长和 5 秒期限；ZIP 关闭后再次检查大小，随后才转 base64。超限返回错误，不返回残缺 ZIP。base64 体积约为 ZIP 的 4/3 |
+
+超长单行仅保留有界前缀并标记截断；不会把整文件或无界子进程输出一次性载入内存。扫描预算针对常规本地日志文件，不为阻塞的远程文件系统提供硬实时保证。
+
+#### 测试与 Linux 现场验证
+
+在配置好的项目 Python 环境中，从 DeviceManagementPlatform 根目录运行（继承父工程 Poetry 环境时可加 `poetry run`）：
+
+```bash
+python -m unittest discover -s device-agent/tests -v
+python -m py_compile device-agent/device-agent.py device-agent/tests/test_log_tasks.py
+```
+
+测试使用 `unittest` 和临时业务日志；通过 importlib 隔离导入，mock HTTP、metrics、进程边界及 logging，Windows 上不会打开 `/var/log/device-agent.log`，也不依赖 requests/psutil 已安装。真实 symlink 用例在系统不允许创建链接时跳过；解析后包含关系另有可跨平台执行的测试。
+
+Linux/systemd 设备现场应以 Agent 服务的实际运行用户验证读取权限，先做只读检查：
+
+```bash
+systemctl show --property=LoadState --value device-agent.service frpc.service docker.service
+journalctl --no-pager --output=short-iso --reverse --lines=20 --unit=device-agent.service
+journalctl --no-pager --output=short-iso --reverse --lines=20 --unit=frpc.service
+journalctl --no-pager --output=short-iso --reverse --lines=20 --unit=docker.service
+journalctl --no-pager --output=short-iso --reverse --lines=20
+```
+
+通过平台任务链路分别提交四个 `source`，核对 `report_log_task` 的来源、UTC 时间和行数；再验证 ISO 时间窗口、级别、关键词、无匹配窗口、大量日志截断及错误报告。缺服务/权限/存储失败可用单元测试或隔离测试机验证，不在生产机停服务或删除 journal。验证前后检查心跳与 FRP 状态；本地单元测试不代表这些现场检查已经完成。
 
 ---
 
