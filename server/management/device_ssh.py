@@ -3,9 +3,12 @@
 import base64
 import binascii
 import hashlib
+import logging
 import re
+import secrets
 from datetime import timedelta
 from hmac import compare_digest
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from django.conf import settings
@@ -26,6 +29,7 @@ FINGERPRINT_PATTERN = r'^SHA256:[A-Za-z0-9+/]{43}$'
 OPEN_TASK = ('pending', 'processing')
 LIVE_FOR = timedelta(seconds=45)
 TASK_TTL = timedelta(seconds=150)
+logger = logging.getLogger(__name__)
 
 
 def key_fingerprint(line):
@@ -60,6 +64,16 @@ class TaskInput(serializers.Serializer):
         if action == 'add_key':
             data['fingerprint'] = key_fingerprint(data['public_key'])
         return data
+
+
+class EnrollmentInput(serializers.Serializer):
+    account = serializers.RegexField(r'^[a-z_][a-z0-9_-]{0,30}$')
+    independent_recovery_verified = serializers.BooleanField()
+
+    def validate_account(self, value):
+        if value == 'root':
+            raise serializers.ValidationError('SSH 纳管只允许使用非 root 账号')
+        return value
 
 
 class KeyState(serializers.Serializer):
@@ -115,6 +129,21 @@ def expire_tasks(device_id, now):
     ).update(status='expired', completed_at=now, payload={})
 
 
+def enrollment_url():
+    """返回供设备校验证书并访问专用 API 的地址。"""
+    url = settings.DEVICE_SSH_PUBLIC_URL
+    try:
+        endpoint = urlsplit(url)
+        port = endpoint.port
+    except ValueError:
+        return ''
+    if (endpoint.scheme != 'https' or not endpoint.hostname or endpoint.username is not None
+            or endpoint.query or endpoint.fragment or port == 0 or not endpoint.path
+            or any(char.isspace() for char in url)):
+        return ''
+    return url
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def management_view(request, device_id):
@@ -136,6 +165,7 @@ def management_view(request, device_id):
     } for t in device.ssh_management_tasks.all()[:12]]
     return Response({
         'enabled': True,
+        'enrollment_available': bool(enrollment_url() and not (record and record.frp_publickey_locked)),
         'enrolled': bool(record and record.credential_hash),
         'online': bool(record and record.credential_hash and record.last_seen_at
                        and record.last_seen_at + LIVE_FOR > now),
@@ -143,6 +173,43 @@ def management_view(request, device_id):
         'state': record.reported_state if record else {},
         'tasks': tasks,
     })
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+@transaction.atomic
+def create_enrollment(request, device_id):
+    """签发一次性设备凭据，供管理员经现有可信 SSH 通道安装到 Agent。"""
+    operator_access(request)
+    device = get_object_or_404(Device.objects.select_for_update(), device_id=device_id)
+    data = EnrollmentInput(data=request.data)
+    data.is_valid(raise_exception=True)
+    server_url = enrollment_url()
+    if not server_url:
+        return Response({'detail': '平台未配置 HTTPS SSH 管理地址'}, status=503)
+
+    record = DeviceSshManagement.objects.filter(device=device).first()
+    if record and record.credential_hash:
+        return Response({'detail': '设备已有 SSH 纳管凭据；若凭据遗失，请先通过可信控制台撤销后重新签发'}, status=409)
+    if record and record.frp_publickey_locked:
+        return Response({'detail': '设备已启用仅公钥策略，不能重新初始化纳管凭据'}, status=409)
+
+    credential = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(credential.encode('ascii')).hexdigest()
+    DeviceSshManagement.objects.update_or_create(device=device, defaults={
+        'credential_hash': digest,
+        'last_seen_at': None,
+        'reported_at': None,
+        'reported_state': {},
+    })
+    logger.info('设备 SSH 凭据已签发 device=%s operator=%s', device.device_id, request.user.pk)
+    return Response({
+        'device_id': device.device_id,
+        'account': data.validated_data['account'],
+        'credential': credential,
+        'server_url': server_url,
+        'independent_recovery_verified': data.validated_data['independent_recovery_verified'],
+    }, status=201, headers={'Cache-Control': 'no-store'})
 
 
 @api_view(['POST'])
@@ -195,9 +262,17 @@ def poll_task(request, device_id):
     state = AgentState(data=request.data)
     state.is_valid(raise_exception=True)
     now = timezone.now()
-    DeviceSshManagement.objects.filter(pk=record.pk, credential_hash=record.credential_hash).update(
-        last_seen_at=now, reported_at=now, reported_state=dict(state.data),
-    )
+    snapshot = dict(state.data)
+    fields = {'last_seen_at': now, 'reported_at': now, 'reported_state': snapshot}
+    if not record.frp_publickey_locked and snapshot['mode'] == 'active' and snapshot['remote_publickey_only']:
+        # 仅用可信状态补偿已领取的管理员确认任务，不能单凭设备上报完成首次切换。
+        verified = [key['fingerprint'] for key in snapshot['keys'] if key['verified']]
+        if snapshot['frp_target'] == 2222 and verified and DeviceSshTask.objects.filter(
+            device_id=record.device_id, task_type='confirm', status__in=('processing', 'expired'),
+            started_at__gte=record.created_at, result__fingerprint__in=verified,
+        ).exists():
+            fields['frp_publickey_locked'] = True
+    DeviceSshManagement.objects.filter(pk=record.pk, credential_hash=record.credential_hash).update(**fields)
     expire_tasks(record.device_id, now)
     task = DeviceSshTask.objects.filter(device_id=record.device_id, status='pending').first()
     if task and DeviceSshTask.objects.filter(

@@ -75,6 +75,11 @@ jobs:
           done
           exit 1
 
+      - name: Validate platform-managed SSH over built-in TLS
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}
+        run: bash deployment/deploy-simple/test-ssh-tls.sh "$IMAGE"
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

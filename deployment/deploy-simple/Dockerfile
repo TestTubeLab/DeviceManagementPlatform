@@ -27,7 +27,8 @@ LABEL org.opencontainers.image.version=${DMP_VERSION}
 LABEL maintainer="Yanxicoder"
 LABEL description="Device Management Platform - All-in-One"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i 's|http://deb.debian.org/|https://deb.debian.org/|g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 update && apt-get install -y --no-install-recommends \
     nginx \
     curl \
     ca-certificates \

@@ -1,6 +1,9 @@
 """Record scoped platform actions and request failures using Django middleware."""
 import traceback
 
+from django.conf import settings
+from django.http import JsonResponse
+
 from .models import Device, Project
 from .system_logs import record_system_log, request_secrets
 
@@ -21,6 +24,29 @@ SKIP_ACTIONS = {
     'list_logs', 'read_log', 'search_logs', 'download_log', 'service_logs',
 }
 CALLBACK_ACTIONS = {'config_result', 'progress', 'update_progress', 'report_system_task'}
+
+
+class ProtectedOperatorTransportMiddleware:
+    """启用内置 TLS 时，旧 HTTP 只继续承载未使用运维凭据的接口。"""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if settings.DEVICE_SSH_BUILTIN_TLS and not request.is_secure():
+            path = request.path_info.rstrip('/')
+            if (
+                path == '/api/auth/login'
+                or path == '/admin'
+                or path.startswith('/admin/')
+                or request.META.get('HTTP_AUTHORIZATION')
+                or settings.SESSION_COOKIE_NAME in request.COOKIES
+            ):
+                return JsonResponse(
+                    {'error': '请通过已验证证书的 HTTPS 管理入口登录'},
+                    status=403, headers={'Cache-Control': 'no-store'},
+                )
+        return self.get_response(request)
 
 
 class OperationLogMiddleware:

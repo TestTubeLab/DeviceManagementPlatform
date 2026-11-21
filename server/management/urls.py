@@ -23,6 +23,7 @@ urlpatterns = [
     path('platform/release/', PlatformReleaseView.as_view(), name='platform_release'),
     path('platform/updates/', PlatformUpdateView.as_view(), name='platform_update'),
     path('devices/<str:device_id>/ssh-management/', device_ssh.management_view),
+    path('devices/<str:device_id>/ssh-management/enrollment/', device_ssh.create_enrollment),
     path('devices/<str:device_id>/ssh-management/tasks/', device_ssh.create_task),
     path('agent/ssh-management/<str:device_id>/poll/', device_ssh.poll_task),
     path('agent/ssh-management/<str:device_id>/receipt/', device_ssh.report_task),

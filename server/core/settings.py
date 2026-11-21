@@ -50,6 +50,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'management.middleware.ProtectedOperatorTransportMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -192,6 +193,11 @@ DEFAULT_CHARSET = 'utf-8'
 # FRP 内网穿透配置（支持云端热替换）
 # =============================================================================
 DEVICE_SSH_MANAGEMENT_ENABLED = os.getenv('DEVICE_SSH_MANAGEMENT_ENABLED') == '1'
+DEVICE_SSH_PUBLIC_URL = os.getenv('DEVICE_SSH_PUBLIC_URL', '').rstrip('/')
+DEVICE_SSH_BUILTIN_TLS = os.getenv('DEVICE_SSH_BUILTIN_TLS') == '1'
+if DEVICE_SSH_BUILTIN_TLS:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 if os.getenv('DEVICE_SSH_TRUST_HTTPS_PROXY') == '1':
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 

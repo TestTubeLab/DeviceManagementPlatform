@@ -28,8 +28,10 @@ SSHD = '/usr/sbin/sshd'
 SSHD_UNIT = 'device-agent-managed-ssh.service'
 ROLLBACK_UNIT = 'device-agent-ssh-rollback.service'
 ROLLBACK_TIMER = 'device-agent-ssh-rollback.timer'
+DEVICE_ID_FILE = Path('/etc/device-id')
 FRPC = Path('/etc/frp/frpc.ini')
 FRPC_UNIT = 'frpc.service'
+SERVER_CA = ROOT / 'server-ca.crt'
 MANAGED_PORT = 2222
 WINDOW = 300
 FINGERPRINT = re.compile(r'SHA256:[A-Za-z0-9+/]{43}')
@@ -90,25 +92,36 @@ def public_key(line):
 
 
 class SshManagement:
-    def __init__(self, device_id, cloud_server=None):
+    def __init__(self, device_id, *, load_enrollment=True):
         self.device_id = device_id
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', device_id or ''):
             raise SshManagementError('设备编号格式不支持 SSH 纳管')
         self.settings_path = ROOT / 'enrollment.json'
         self.state_path = ROOT / 'state.json'
         root_owned_path(ROOT, directory=True)
+        self.base_url = ''
+        self.credential = ''
+        self.account = ''
+        self.recovery_verified = False
+        self.verify = str(SERVER_CA)
         # 专用服务必须在 Agent 不运行时仍能读取回退状态。
         self.proxy_section = f'{device_id}_ssh'
-        if cloud_server is not None:
-            url = urlsplit(cloud_server)
-            if url.scheme != 'https' or not url.hostname or url.username or url.query or url.fragment:
-                raise SshManagementError('SSH 管理 Agent 只能使用经证书校验的 HTTPS')
+        if load_enrollment and self.settings_path.exists():
             root_owned_path(self.settings_path)
             enrollment = json.loads(self.settings_path.read_text(encoding='utf-8'))
+            cloud_server = enrollment.get('server_url')
+            url = urlsplit(cloud_server if isinstance(cloud_server, str) else '')
+            if (url.scheme != 'https' or not url.hostname or url.username or url.password
+                    or url.query or url.fragment):
+                raise SshManagementError('SSH 管理 Agent 必须配置 HTTPS 平台地址')
+            root_owned_path(SERVER_CA, public_readable=True)
             self.account = enrollment.get('account')
             self.credential = enrollment.get('credential')
-            if not isinstance(self.account, str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,30}', self.account):
+            if not isinstance(self.account, str) or not re.fullmatch(
+                    r'[a-z_][a-z0-9_-]{0,30}', self.account):
                 raise SshManagementError('本机运维账号配置错误')
+            if self.account == 'root':
+                raise SshManagementError('SSH 纳管禁止使用 root 账号')
             if not isinstance(self.credential, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', self.credential):
                 raise SshManagementError('设备 SSH 凭据无效')
             self.recovery_verified = enrollment.get('independent_recovery_verified') is True
@@ -223,6 +236,8 @@ class SshManagement:
             or effective.get('authorizedkeysfile') != str(KEY_FILE)
             or effective.get('allowusers') != self.account
             or effective.get('listenaddress') != f'127.0.0.1:{MANAGED_PORT}'
+            or effective.get('maxauthtries') != '3'
+            or effective.get('logingracetime') != '20'
         ):
             raise SshManagementError('独立 SSH 服务的生效设置不符合仅公钥策略')
         pid = properties.get('MainPID', '')
@@ -245,6 +260,7 @@ class SshManagement:
             f'AuthorizedKeysFile {KEY_FILE}\nAllowUsers {self.account}\n'
             'PermitRootLogin no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n'
             'PubkeyAuthentication yes\nAuthenticationMethods publickey\nUsePAM yes\n'
+            'MaxAuthTries 3\nLoginGraceTime 20\nMaxStartups 10:30:30\n'
             'PermitEmptyPasswords no\nDisableForwarding yes\nPermitUserEnvironment no\nLogLevel VERBOSE\n'
             'Subsystem sftp internal-sftp\n'
         )
@@ -482,7 +498,9 @@ class SshManagement:
             raise
 
     def poll(self):
-        """在已认证的 HTTPS 通道上领取一次任务并补发未上报回执。"""
+        """通过固定私有 CA 的 HTTPS 通道领取任务并补发回执。"""
+        if not self.base_url or not self.credential:
+            raise SshManagementError('缺少 SSH 纳管凭据或 HTTPS 平台地址')
         with self.lock():
             state = self.load_state()
             pending = state.get('pending')
@@ -495,7 +513,9 @@ class SshManagement:
             snapshot = self.status()
         headers = {'Authorization': 'Bearer ' + self.credential}
         with requests.Session() as session:
+            session.trust_env = False
             session.headers.update(headers)
+            session.verify = self.verify
             receipt_path = ROOT / 'receipt.json'
             if receipt_path.exists():
                 receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
@@ -548,11 +568,71 @@ class SshManagement:
             time.sleep(8)
 
 
-if __name__ == '__main__':
-    if len(sys.argv) != 3 or sys.argv[1] != 'rollback':
-        sys.exit('expected rollback <device-id>')
-    manager = SshManagement(sys.argv[2])
+def enroll(ca_path, *, recovery_verified=False):
+    """从标准输入读取纳管文件，验证本机身份、账号及 TLS 后写入首次纳管配置。"""
+    if os.geteuid() != 0:
+        raise SshManagementError('需要在目标设备的可信 root 终端执行纳管')
+    root_owned_path(DEVICE_ID_FILE, public_readable=True)
+    device_id = DEVICE_ID_FILE.read_text(encoding='ascii').strip()
+    raw = sys.stdin.read(8193)
+    if len(raw) > 8192:
+        raise SshManagementError('纳管文件超出大小限制')
+    enrollment = json.loads(raw)
+    if not isinstance(enrollment, dict) or enrollment.get('device_id') != device_id:
+        raise SshManagementError('纳管文件的设备 ID 与本机不一致')
+    if set(enrollment) - {'device_id', 'account', 'credential', 'server_url', 'independent_recovery_verified'}:
+        raise SshManagementError('纳管文件含不支持的字段')
+
+    with ca_path.open('rb') as handle:
+        ca_data = handle.read(32769)
+    if len(ca_data) > 32768 or b'PRIVATE KEY' in ca_data or b'-----BEGIN CERTIFICATE-----' not in ca_data:
+        raise SshManagementError('请输入已核对指纹的公开平台 CA 证书')
+
+    # 恢复入口必须从设备本机明确确认，不信任下载文件中的确认标记。
+    enrollment['independent_recovery_verified'] = recovery_verified
+    ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    root_owned_path(ROOT, directory=True)
+    manager = SshManagement(device_id, load_enrollment=False)
     with manager.lock():
-        state = manager.load_state()
-        if state['mode'] == 'pending' and state['pending']['until'] <= time.time():
-            manager.rollback(state)
+        if any(os.path.lexists(path) for path in (manager.settings_path, manager.state_path, SERVER_CA)):
+            raise SshManagementError('已有纳管配置或策略，请按凭据轮换流程处理')
+        atomic_write(SERVER_CA, ca_data)
+        try:
+            atomic_write(manager.settings_path, json.dumps(enrollment))
+            manager = SshManagement(device_id)
+            manager.verify_account()
+            # 空状态在认证后、领取任务前被拒绝，可核对凭据且不会执行任务。
+            with requests.Session() as session:
+                session.trust_env = False
+                response = session.post(
+                    manager.base_url + '/poll/', json={}, verify=manager.verify,
+                    headers={'Authorization': 'Bearer ' + manager.credential},
+                    timeout=(3, 5), allow_redirects=False,
+                )
+            body = response.json()
+            if (response.status_code != 400 or not isinstance(body, dict)
+                    or not {'account', 'mode', 'keys'}.issubset(body)):
+                raise SshManagementError('平台未接受纳管凭据或 SSH Agent API 路径错误')
+        except (OSError, ValueError, requests.RequestException):
+            manager.settings_path.unlink(missing_ok=True)
+            SERVER_CA.unlink(missing_ok=True)
+            raise
+
+
+if __name__ == '__main__':
+    if len(sys.argv) in (3, 4) and sys.argv[1] == 'enroll' and sys.argv[3:] in ([], ['--recovery-verified']):
+        try:
+            enroll(Path(sys.argv[2]), recovery_verified=len(sys.argv) == 4)
+        except SshManagementError as exc:
+            sys.exit(str(exc))
+        except (OSError, ValueError, requests.RequestException):
+            sys.exit('首次纳管失败，请核对纳管文件格式、平台证书和设备网络')
+        print('首次纳管配置已就绪，重启 device-agent 后核对专用心跳')
+    elif len(sys.argv) == 3 and sys.argv[1] == 'rollback':
+        manager = SshManagement(sys.argv[2], load_enrollment=False)
+        with manager.lock():
+            state = manager.load_state()
+            if state['mode'] == 'pending' and state['pending']['until'] <= time.time():
+                manager.rollback(state)
+    else:
+        sys.exit('用法: ssh_management.py enroll <CA 文件> [--recovery-verified] < <纳管 JSON>')

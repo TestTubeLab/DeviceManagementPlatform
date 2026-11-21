@@ -66,6 +66,44 @@ class DeviceSshTests(APITestCase):
         self.assertEqual(self.poll().status_code, 200)
         self.assertEqual(self.create().status_code, 201)
 
+    def test_agent_enrollment_preflight_authenticates_without_claiming_task(self):
+        self.poll()
+        self.client.force_authenticate(self.admin)
+        created = self.create()
+        self.assertEqual(created.status_code, 201)
+        response = self.poll({})
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue({'account', 'mode', 'keys'}.issubset(response.data))
+        self.assertEqual(DeviceSshTask.objects.get(task_id=created.data['id']).status, 'pending')
+
+    @override_settings(DEVICE_SSH_BUILTIN_TLS=True)
+    def test_builtin_tls_does_not_allow_operator_credentials_on_legacy_http(self):
+        login_url = '/api/auth/login/'
+        payload = {'username': self.admin.username, 'password': 'isolated-fixture-password'}
+        self.admin.set_password(payload['password'])
+        self.admin.save(update_fields=['password'])
+        self.assertEqual(self.client.post(login_url, payload, format='json').status_code, 403)
+        login = self.client.post(login_url, payload, format='json', secure=True)
+        self.assertEqual(login.status_code, 200)
+        authorization = 'Token ' + login.data['token']
+        self.assertEqual(self.client.get('/api/auth/user/', HTTP_AUTHORIZATION=authorization).status_code, 403)
+        self.assertEqual(self.client.get('/api/auth/user/', HTTP_AUTHORIZATION=authorization, secure=True).status_code, 200)
+        self.assertEqual(self.client.get('/api/platform/health/').status_code, 200)
+        heartbeat = self.client.post(f'/api/devices/{self.device.device_id}/heartbeat/', {}, format='json')
+        self.assertEqual(heartbeat.status_code, 200)
+
+    def test_legacy_update_is_not_queued_or_delivered_after_ssh_enrollment(self):
+        device_url = f'/api/devices/{self.device.device_id}/'
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self.client.post(device_url + 'update_agent/').status_code, 409)
+        self.device.config = {'pending_agent_update': True}
+        self.device.save(update_fields=['config'])
+        response = self.client.post(device_url + 'heartbeat/', {}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(response.data['command'], 'update_agent')
+        self.device.refresh_from_db()
+        self.assertFalse(self.device.config['pending_agent_update'])
+
     @override_settings(DEVICE_SSH_MANAGEMENT_ENABLED=False)
     def test_released_entry_reports_disabled_without_opening_agent_or_writes(self):
         url = f'/api/devices/{self.device.device_id}/ssh-management/'
@@ -78,6 +116,58 @@ class DeviceSshTests(APITestCase):
         self.assertEqual(response.data['state'], {})
         self.assertEqual(self.create().status_code, 403)
         self.assertEqual(self.poll().status_code, 403)
+
+    @override_settings(DEVICE_SSH_PUBLIC_URL='https://platform.test:8443/api')
+    def test_enrollment_issues_one_time_credential_only_to_authorized_operator(self):
+        unconfigured = Device.objects.create(device_id='DEV-ssh-unconfigured')
+        url = f'/api/devices/{unconfigured.device_id}/ssh-management/enrollment/'
+        payload = {'account': 'jetson', 'independent_recovery_verified': False}
+        self.client.force_authenticate(self.staff)
+        self.assertEqual(self.client.post(url, payload, format='json', secure=True).status_code, 403)
+
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self.client.post(url, payload, format='json').status_code, 403)
+        response = self.client.post(url, payload, format='json', secure=True)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response['Cache-Control'], 'no-store')
+        self.assertEqual(response.data['server_url'], 'https://platform.test:8443/api')
+        self.assertEqual(len(response.data['credential']), 43)
+        record = DeviceSshManagement.objects.get(device=unconfigured)
+        self.assertEqual(record.credential_hash, hashlib.sha256(response.data['credential'].encode()).hexdigest())
+        self.assertNotIn('credential', self.client.get(
+            f'/api/devices/{unconfigured.device_id}/ssh-management/', secure=True,
+        ).data)
+        self.assertEqual(self.client.post(url, payload, format='json', secure=True).status_code, 409)
+
+    def test_enrollment_requires_configured_https_url(self):
+        unconfigured = Device.objects.create(device_id='DEV-ssh-unconfigured')
+        url = f'/api/devices/{unconfigured.device_id}/ssh-management/enrollment/'
+        self.client.force_authenticate(self.admin)
+        with override_settings(DEVICE_SSH_PUBLIC_URL='http://platform.test/api'):
+            response = self.client.post(
+                url, {'account': 'jetson', 'independent_recovery_verified': False},
+                format='json', secure=True,
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(DeviceSshManagement.objects.filter(device=unconfigured).exists())
+
+    def test_agent_state_recovers_remote_policy_lock_without_confirm_receipt(self):
+        fingerprint = 'SHA256:' + 'a' * 43
+        active = {**STATE, 'mode': 'active', 'remote_publickey_only': True,
+                  'frp_target': 2222, 'keys': [{'fingerprint': fingerprint, 'verified': True}]}
+        self.assertEqual(self.poll({**active, 'keys': []}).status_code, 200)
+        self.assertFalse(DeviceSshManagement.objects.get(device=self.device).frp_publickey_locked)
+        self.assertEqual(self.poll(active).status_code, 200)
+        self.assertFalse(DeviceSshManagement.objects.get(device=self.device).frp_publickey_locked)
+        self.poll({**STATE, 'mode': 'pending', 'pending_fingerprint': fingerprint, 'login_observed': True})
+        self.client.force_authenticate(self.admin)
+        task = self.create({'operation': 'confirm', 'fingerprint': fingerprint, 'operator_verified': True})
+        self.assertEqual(task.status_code, 201)
+        self.assertEqual(self.poll().data['task']['id'], task.data['id'])
+        DeviceSshTask.objects.filter(task_id=task.data['id']).update(expires_at=timezone.now() - timedelta(seconds=1))
+        self.assertEqual(self.poll(active).status_code, 200)
+        self.assertEqual(self.poll().status_code, 200)
+        self.assertTrue(DeviceSshManagement.objects.get(device=self.device).frp_publickey_locked)
 
     def test_single_claim_receipt_and_device_isolation(self):
         self.assertEqual(self.poll(device=self.other).status_code, 403)

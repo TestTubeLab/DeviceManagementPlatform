@@ -14,13 +14,19 @@
     />
     <el-alert
       v-else-if="management?.enabled === false"
-      title="平台已提供 SSH 管理入口，设备纳管未启用。现有 SSH 登录方式不变。"
-      type="info"
+      title="平台尚未启用 SSH 管理。请联系平台管理员检查服务配置。"
+      type="warning"
       :closable="false"
     />
     <el-alert
-      v-else-if="management && !management.online"
-      :title="management.enrolled ? 'SSH 管理 Agent 离线；以下是历史状态。' : '设备尚未纳管；SSH 设置未改变。'"
+      v-if="windowLocationProtocol !== 'https:'"
+      title="请打开管理平台的 HTTPS 入口并验证证书，再进行 SSH 管理。"
+      type="warning"
+      :closable="false"
+    />
+    <el-alert
+      v-if="!loadFailed && management?.enrolled && !management.online"
+      :title="management.reported_at ? 'SSH 管理 Agent 离线；以下是历史状态。' : '已签发设备凭据，等待 Agent 首次上报。'"
       type="warning"
       :closable="false"
     />
@@ -41,6 +47,23 @@
       </el-descriptions>
       <el-alert v-if="state.error" :title="state.error" type="warning" :closable="false" />
       <el-alert
+        v-if="management?.enabled && !management.enrolled && !management.enrollment_available"
+        title="平台尚未配置网页签发。请在可信运维控制台签发设备凭据，并确认设备能访问加密入口。"
+        type="warning"
+        :closable="false"
+      />
+      <section v-if="enrollmentBundle || (management?.enrollment_available && !management.enrolled)" class="enrollment">
+        <strong>{{ enrollmentBundle ? '纳管文件已签发' : '设备尚未纳管' }}</strong>
+        <p>通过可信安装方式交付 Agent 模块、平台 CA 和纳管文件。安装后等待设备上报，纳管不会自动改变 SSH 登录策略。</p>
+        <el-input v-model="enrollmentAccount" :disabled="!!enrollmentBundle" placeholder="设备上已有的非 root 运维账号" />
+        <el-button
+          type="primary"
+          :disabled="!enrollmentAccount.trim() || !!enrollmentBundle || submitting || windowLocationProtocol !== 'https:'"
+          @click="createEnrollmentFile"
+        >签发并下载一次性纳管文件</el-button>
+        <el-button v-if="enrollmentBundle" @click="downloadEnrollmentFile">重新下载本次纳管文件</el-button>
+      </section>
+      <el-alert
         v-if="management?.online && state.mode !== 'active' && !state.independent_recovery_verified"
         title="设备尚未确认独立恢复入口，不能切换 FRP 的 SSH 认证。"
         type="info"
@@ -55,7 +78,7 @@
       />
       <el-button
         v-if="state.pending_fingerprint"
-        :disabled="busy || !management?.online || !state.login_observed || !!state.error"
+        :disabled="loadFailed || busy || !management?.online || !state.login_observed || !!state.error"
         type="primary"
         @click="confirmLogin"
       >确认已通过 FRP 登录</el-button>
@@ -114,7 +137,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { createSshTask, getSshManagement, type SshAction, type SshManagement } from '@/api/deviceSsh'
+import {
+  createSshEnrollment, createSshTask, getSshManagement,
+  type SshAction, type SshEnrollment, type SshManagement,
+} from '@/api/deviceSsh'
 import { downloadNewSshKey } from '@/utils/ed25519Download'
 
 const props = defineProps<{ deviceId: string; externalPort: number | null }>()
@@ -124,6 +150,9 @@ const loading = ref(false)
 const loadFailed = ref(false)
 const submitting = ref(false)
 const publicKey = ref('')
+const enrollmentAccount = ref('')
+const enrollmentBundle = ref<SshEnrollment | null>(null)
+const windowLocationProtocol = window.location.protocol
 let refreshTimer: ReturnType<typeof setInterval> | undefined
 let mounted = false
 const state = computed(() => management.value?.state ?? {})
@@ -179,6 +208,47 @@ async function submit(action: SshAction) {
 
 async function addKey() {
   if (await submit({ operation: 'add_key', public_key: publicKey.value.trim() })) publicKey.value = ''
+}
+
+async function createEnrollmentFile() {
+  if (submitting.value || loadFailed.value || !management.value?.enrollment_available) return
+  try {
+    await ElMessageBox.confirm(
+      '平台不保存凭据明文，关闭此窗口后无法找回。请通过可信安装方式交付到对应设备；不要发送到聊天或普通文件共享。',
+      '签发设备纳管文件',
+      { type: 'warning', confirmButtonText: '签发并下载', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  if (submitting.value || enrollmentBundle.value) return
+  submitting.value = true
+  try {
+    enrollmentBundle.value = await createSshEnrollment(props.deviceId, {
+      account: enrollmentAccount.value.trim(),
+      independent_recovery_verified: false,
+    })
+    downloadEnrollmentFile()
+    await refresh()
+  } catch (error) {
+    const responseDetail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    ElMessage.error(responseDetail || '纳管文件签发失败，请检查 HTTPS、权限和平台配置')
+  } finally {
+    submitting.value = false
+  }
+}
+
+function downloadEnrollmentFile() {
+  if (!enrollmentBundle.value) return
+  const blob = new Blob([JSON.stringify(enrollmentBundle.value, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `${props.deviceId}-ssh-enrollment.json`
+  document.body.append(anchor)
+  anchor.click()
+  anchor.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 async function generateKey() {
@@ -250,6 +320,18 @@ onUnmounted(() => {
   display: grid;
   gap: 12px;
   min-height: 42px;
+}
+
+.enrollment {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--el-border-color);
+}
+
+.enrollment p {
+  margin: 0;
+  color: var(--el-text-color-secondary);
 }
 
 .wrap {

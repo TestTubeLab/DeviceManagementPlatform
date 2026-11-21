@@ -665,14 +665,19 @@ WantedBy=multi-user.target
         return False
 
 
+def has_managed_ssh_config():
+    """纳管目录中仅有锁文件时，不改变旧设备行为。"""
+    return any(os.path.lexists(os.path.join(SSH_MANAGEMENT_ROOT, name)) for name in ('enrollment.json', 'state.json'))
+
+
 def apply_frp_config(frp_config):
     """受管设备在同一把锁下进行 FRP 同步；未纳管设备保持原路径。"""
-    if not os.path.lexists(SSH_MANAGEMENT_ROOT):
+    if not has_managed_ssh_config():
         return _apply_frp_config(frp_config)
     try:
         from ssh_management import SshManagement
 
-        manager = SshManagement(get_device_id())
+        manager = SshManagement(get_device_id(), load_enrollment=False)
         with manager.lock():
             result = _apply_frp_config(frp_config, render_guard=manager.render_cloud_config)
             if result[0]:
@@ -739,12 +744,12 @@ def _apply_frp_config(frp_config, render_guard=None):
 
 def disable_frp():
     """平台要求停用时，不允许试登超时重新启动 FRP。"""
-    if not os.path.lexists(SSH_MANAGEMENT_ROOT):
+    if not has_managed_ssh_config():
         return _disable_frp()
     try:
         from ssh_management import SshManagement
 
-        manager = SshManagement(get_device_id())
+        manager = SshManagement(get_device_id(), load_enrollment=False)
         with manager.lock():
             manager.note_frp_enabled(False)
             return _disable_frp()
@@ -919,6 +924,10 @@ def download_new_agent():
 
 def apply_agent_update():
     """应用 Agent 更新：下载新版本并重启服务"""
+    if has_managed_ssh_config():
+        logger.warning("SSH 已纳管，拒绝旧版单脚本更新；请通过可信运维入口升级完整 Agent")
+        return False
+
     logger.info("开始更新 Agent...")
     
     # 1. 下载新版本
@@ -2827,7 +2836,7 @@ def main():
             from threading import Thread
             from ssh_management import SshManagement
 
-            ssh_manager = SshManagement(device_id, CLOUD_SERVER)
+            ssh_manager = SshManagement(device_id)
             Thread(
                 target=ssh_manager.run_poll_loop, args=(logger,), daemon=True, name='device-ssh-management',
             ).start()

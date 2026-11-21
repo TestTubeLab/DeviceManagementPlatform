@@ -22,6 +22,7 @@ export type SshAction =
 
 export interface SshManagement {
   enabled?: boolean
+  enrollment_available?: boolean
   enrolled: boolean
   online: boolean
   reported_at: string | null
@@ -35,8 +36,25 @@ export interface SshManagement {
   }[]
 }
 
+export interface SshEnrollment {
+  device_id: string
+  account: string
+  credential: string
+  server_url: string
+  independent_recovery_verified: boolean
+}
+
 export function getSshManagement(id: string) {
   return request.get<unknown, SshManagement>(`/devices/${encodeURIComponent(id)}/ssh-management/`)
+}
+
+export function createSshEnrollment(
+  id: string,
+  payload: { account: string; independent_recovery_verified: boolean },
+) {
+  return request.post<unknown, SshEnrollment>(
+    `/devices/${encodeURIComponent(id)}/ssh-management/enrollment/`, payload,
+  )
 }
 
 export function createSshTask(id: string, action: SshAction) {

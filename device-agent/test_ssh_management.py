@@ -2,10 +2,12 @@
 
 import base64
 import hashlib
+import io
 import json
 import tempfile
 import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -43,7 +45,9 @@ class AgentSshTests(unittest.TestCase):
         self.frpc = root / 'frpc.ini'
         self.frpc.write_text(FRPC_SOURCE, encoding='utf-8')
         fixtures = patch.multiple(
-            ssh, ROOT=root, FRPC=self.frpc, KEY_FILE=root / 'keys', root_owned_path=lambda *_a, **_kw: None,
+            ssh, ROOT=root, SERVER_CA=root / 'server-ca.crt', FRPC=self.frpc,
+            DEVICE_ID_FILE=root / 'device-id',
+            KEY_FILE=root / 'keys', root_owned_path=lambda *_a, **_kw: None,
             atomic_write=lambda path, data, *_args: (
                 path.write_bytes(data) if isinstance(data, bytes) else path.write_text(data, encoding='utf-8')
             ),
@@ -56,11 +60,117 @@ class AgentSshTests(unittest.TestCase):
         self.key_a = fixture_key(b'a')
         self.key_b = fixture_key(b'b')
 
+    def test_enrollment_requires_https_and_uses_the_installed_private_ca(self):
+        self.agent.settings_path.write_text(json.dumps({
+            'account': 'maintainer', 'credential': 'x' * 43,
+            'server_url': 'http://platform.example/api',
+        }), encoding='utf-8')
+        with self.assertRaisesRegex(ssh.SshManagementError, 'HTTPS'):
+            ssh.SshManagement('DEV-test')
+
+        self.agent.settings_path.write_text(json.dumps({
+            'account': 'maintainer', 'credential': 'x' * 43,
+            'server_url': 'https://platform.example:8443/api',
+            'independent_recovery_verified': True,
+        }), encoding='utf-8')
+        ssh.SERVER_CA.write_text('trusted private CA fixture', encoding='ascii')
+        enrolled = ssh.SshManagement('DEV-test')
+        self.assertEqual(enrolled.base_url, 'https://platform.example:8443/api/agent/ssh-management/DEV-test')
+        self.assertEqual(enrolled.verify, str(ssh.SERVER_CA))
+        self.assertTrue(enrolled.recovery_verified)
+
+        enrollment = json.loads(self.agent.settings_path.read_text(encoding='utf-8'))
+        enrollment['account'] = 'root'
+        self.agent.settings_path.write_text(json.dumps(enrollment), encoding='utf-8')
+        with self.assertRaisesRegex(ssh.SshManagementError, '禁止使用 root'):
+            ssh.SshManagement('DEV-test')
+
     def test_key_validation_and_fingerprint(self):
         self.assertEqual(ssh.public_key(self.key_a[1]), self.key_a)
         for invalid in ('command="date" ' + self.key_a[1], self.key_a[1] + '\n' + self.key_b[1], None):
             with self.assertRaises(ssh.SshManagementError):
                 ssh.public_key(invalid)
+
+    def test_enrollment_checks_device_and_tls_and_leaves_recovery_unconfirmed(self):
+        ssh.DEVICE_ID_FILE.write_text('DEV-test\n', encoding='ascii')
+        ca = ssh.ROOT / 'ca-input'
+        ca.write_bytes(b'-----BEGIN CERTIFICATE-----\nfixture')
+        enrollment = {
+            'device_id': 'DEV-other', 'account': 'maintainer', 'credential': 'x' * 43,
+            'server_url': 'https://platform.example:8443/api', 'independent_recovery_verified': True,
+        }
+        with (
+            patch.object(ssh.os, 'geteuid', return_value=0, create=True),
+            patch.object(ssh.SshManagement, 'verify_account'),
+            patch.object(ssh.SshManagement, 'lock', side_effect=nullcontext),
+            patch.object(ssh.requests, 'Session') as session,
+        ):
+            with patch.object(ssh.sys, 'stdin', io.StringIO(json.dumps(enrollment))):
+                with self.assertRaisesRegex(ssh.SshManagementError, '设备 ID'):
+                    ssh.enroll(ca)
+            session.assert_not_called()
+            enrollment['device_id'] = 'DEV-test'
+            post = session.return_value.__enter__.return_value.post
+            post.side_effect = ssh.requests.exceptions.SSLError
+            with patch.object(ssh.sys, 'stdin', io.StringIO(json.dumps(enrollment))):
+                with self.assertRaises(ssh.requests.exceptions.SSLError):
+                    ssh.enroll(ca)
+            self.assertFalse(ssh.SERVER_CA.exists())
+            self.assertFalse(self.agent.settings_path.exists())
+            post.side_effect = None
+            post.return_value = SimpleNamespace(status_code=403, json=lambda: {'detail': '设备认证失败'})
+            with patch.object(ssh.sys, 'stdin', io.StringIO(json.dumps(enrollment))):
+                with self.assertRaisesRegex(ssh.SshManagementError, '未接受纳管凭据'):
+                    ssh.enroll(ca)
+            self.assertFalse(self.agent.settings_path.exists())
+            post.return_value = SimpleNamespace(
+                status_code=400, json=lambda: {key: ['required'] for key in ('account', 'mode', 'keys')},
+            )
+            with patch.object(ssh.sys, 'stdin', io.StringIO(json.dumps(enrollment))):
+                ssh.enroll(ca)
+            self.assertFalse(ssh.SshManagement('DEV-test').recovery_verified)
+            self.assertEqual(post.call_args.kwargs['verify'], str(ssh.SERVER_CA))
+            self.assertFalse(post.call_args.kwargs['allow_redirects'])
+            with patch.object(ssh.sys, 'stdin', io.StringIO(json.dumps(enrollment))):
+                with self.assertRaisesRegex(ssh.SshManagementError, '已有'):
+                    ssh.enroll(ca)
+
+    def test_local_frp_guard_survives_missing_enrollment_dependencies(self):
+        self.agent.settings_path.write_text('broken', encoding='utf-8')
+        self.agent.save_state({'mode': 'active', 'verified': [self.key_a[0]]})
+        with self.assertRaises(ValueError):
+            ssh.SshManagement('DEV-test')
+        offline = ssh.SshManagement('DEV-test', load_enrollment=False)
+        self.assertIn('local_port = 2222', offline.render_cloud_config(FRPC_SOURCE))
+
+    def test_poll_writes_managed_public_key_and_reports_success(self):
+        self.agent.base_url = 'https://platform.example/api/agent/ssh-management/DEV-test'
+        self.agent.credential = 'x' * 43
+        task = {
+            'id': 'a' * 32, 'operation': 'add_key',
+            'expires_at': ssh.datetime.fromtimestamp(time.time() + 100, ssh.timezone.utc).isoformat(),
+            'payload': {'fingerprint': self.key_a[0], 'public_key': self.key_a[1]},
+        }
+        with (
+            patch.object(self.agent, 'lock', side_effect=nullcontext),
+            patch.object(self.agent, 'verify_account'),
+            patch.object(self.agent, 'status', return_value={'mode': 'legacy'}),
+            patch.object(ssh.requests, 'Session') as session,
+        ):
+            post = session.return_value.__enter__.return_value.post
+            post.side_effect = [
+                SimpleNamespace(status_code=200, json=lambda: {'task': task}),
+                SimpleNamespace(status_code=204),
+                SimpleNamespace(status_code=200, json=lambda: {'task': None}),
+            ]
+            self.agent.poll()
+            self.assertEqual(self.agent.managed_keys(), dict([self.key_a]))
+            self.assertEqual(self.agent.config()['DEV-test_ssh']['local_port'], '22')
+            self.agent.poll()
+            receipt_call = post.call_args_list[1]
+            self.assertTrue(receipt_call.args[0].endswith('/receipt/'))
+            self.assertEqual(receipt_call.kwargs['json'], {'id': task['id'], 'ok': True, 'error': ''})
+            self.assertFalse((ssh.ROOT / 'receipt.json').exists())
 
     def test_cannot_switch_if_another_alias_exposes_22_or_port_changed(self):
         self.agent.store_keys(dict([self.key_a]))

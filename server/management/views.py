@@ -10,6 +10,7 @@ import uuid
 from io import StringIO
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.http import HttpResponse
 from django.contrib.auth import authenticate
@@ -222,13 +223,20 @@ def release_device_frp_ports(device, save=True):
         device.save(update_fields=['frp_ssh_port', 'frp_web_port', 'frp_status', 'frp_error_message'])
 
 
+def requires_trusted_agent_upgrade(device):
+    """已签发 SSH 凭据或已锁定策略的设备不能通过旧单脚本升级。"""
+    return DeviceSshManagement.objects.filter(device=device).filter(
+        ~Q(credential_hash='') | Q(frp_publickey_locked=True),
+    ).exists()
+
+
 def mark_device_pending_agent_update(device):
     """标记设备在下次心跳时更新 Agent。"""
     if not device.config:
         device.config = {}
     if device.config.get('agent_version') == AGENT_VERSION:
         return False
-    if device.config.get('pending_agent_update'):
+    if device.config.get('pending_agent_update') or requires_trusted_agent_upgrade(device):
         return False
     device.config['pending_agent_update'] = True
     device.save(update_fields=['config'])
@@ -718,13 +726,13 @@ class DeviceViewSet(viewsets.ModelViewSet):
         
         response_data = {"command": "none"}
         
-        # 检查是否需要更新 Agent（优先级最高）
+        # 消费纳管前残留的旧更新标记时，不阻塞正常部署任务。
         if device.config and device.config.get('pending_agent_update'):
-            response_data = {"command": "update_agent"}
-            # 清除标记
             device.config['pending_agent_update'] = False
-            device.save()
-        elif pending_deployment:
+            device.save(update_fields=['config'])
+            if not requires_trusted_agent_upgrade(device):
+                response_data = {"command": "update_agent"}
+        if response_data['command'] == 'none' and pending_deployment:
             response_data = {
                 "command": "deploy",
                 "task_id": pending_deployment.id,
@@ -733,7 +741,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
                     "config": pending_deployment.config,
                 }
             }
-        elif pending_update:
+        elif response_data['command'] == 'none' and pending_update:
             response_data = {
                 "command": "update",
                 "task_id": pending_update.id,
@@ -980,6 +988,8 @@ class DeviceViewSet(viewsets.ModelViewSet):
         设备下次心跳时会收到更新命令
         """
         device = self.get_object()
+        if requires_trusted_agent_upgrade(device):
+            return Response({'detail': '设备已启用 SSH 纳管流程，请使用可信入口升级完整 Agent'}, status=409)
         
         # 标记需要更新 Agent
         if not device.config:
