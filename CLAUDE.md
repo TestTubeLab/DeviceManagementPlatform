@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **在开始任何工作之前，必须先阅读 [WORKSPACE_GUIDE.md](WORKSPACE_GUIDE.md)**，该文档包含完整的项目架构、业务场景、实际交付流程和痛点分析。本文件是技术开发指南，WORKSPACE_GUIDE.md 是业务和架构全景。
 
+修改、审查或发布 DeviceManagementPlatform 本身时，平台自身的生产更新必须遵循[在线更新说明](deployment/updater/README.md)和 [GitHub Release 工作流](.github/workflows/release.yml)：完成验证后发布新的稳定版本，再在已部署平台的「平台设置 → 检查更新 → 更新」中完成同步。不要将手工上传镜像或替换容器作为常规发版方式。平台向边缘设备部署项目的流程与此不同。
+
 ## 项目概述
 
 DeviceManagementPlatform 是一个远程设备管理与自动化部署平台，专为边缘计算设备（Jetson NX/Orin 开发板）设计。它解决了多台边缘设备分散部署、远程维护困难、代码更新繁琐等痛点。

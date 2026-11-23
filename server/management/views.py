@@ -39,7 +39,7 @@ from .serializers import (
 )
 
 # Agent 最新版本号（每次更新 Agent 时需要同步修改）
-AGENT_VERSION = "1.7.3"  # 增加只读系统服务日志采集
+AGENT_VERSION = "1.7.4"  # FRP 服务故障时通过现有心跳配置链路恢复
 FRP_WEB_LOCAL_PORT = 8088
 
 
@@ -224,7 +224,9 @@ def release_device_frp_ports(device, save=True):
 
 
 def requires_trusted_agent_upgrade(device):
-    """已签发 SSH 凭据或已锁定策略的设备不能通过旧单脚本升级。"""
+    """完整包和已纳管设备不能通过旧单脚本升级。"""
+    if (device.config or {}).get('agent_release_bundle') is True:
+        return True
     return DeviceSshManagement.objects.filter(device=device).filter(
         ~Q(credential_hash='') | Q(frp_publickey_locked=True),
     ).exists()
@@ -699,6 +701,9 @@ class DeviceViewSet(viewsets.ModelViewSet):
             if not device.config:
                 device.config = {}
             device.config['agent_version'] = agent_version
+            # 缺少能力字段的旧心跳不能重启已登记设备的旧版更新路线。
+            if request.data.get('agent_release_bundle') is True:
+                device.config['agent_release_bundle'] = True
         
         # 保存 Agent 上报的 FRP 配置版本
         agent_frp_version = request.data.get('frp_config_version')
@@ -726,7 +731,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
         
         response_data = {"command": "none"}
         
-        # 消费纳管前残留的旧更新标记时，不阻塞正常部署任务。
+        # 消费旧更新标记时，完整包和纳管设备继续领取正常部署任务。
         if device.config and device.config.get('pending_agent_update'):
             device.config['pending_agent_update'] = False
             device.save(update_fields=['config'])
@@ -989,7 +994,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
         """
         device = self.get_object()
         if requires_trusted_agent_upgrade(device):
-            return Response({'detail': '设备已启用 SSH 纳管流程，请使用可信入口升级完整 Agent'}, status=409)
+            return Response({'detail': '请通过可信运维入口升级该设备的完整 Agent 发布包'}, status=409)
         
         # 标记需要更新 Agent
         if not device.config:

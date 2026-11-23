@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+from zipimport import zipimporter
 
 import requests
 
@@ -295,7 +296,7 @@ class SshManagement:
                 time.sleep(0.2)
 
     def arm_rollback(self, until):
-        script = Path(__file__).resolve()
+        script = Path(__loader__.archive if isinstance(__loader__, zipimporter) else __file__).resolve()
         # ExecStart 参数不来自平台任务；禁止 systemd 字符串展开误解释本机路径。
         if not re.fullmatch(r'/[A-Za-z0-9_/.-]+', str(script)):
             raise SshManagementError('SSH 管理模块路径无法用于回退服务')
@@ -619,20 +620,25 @@ def enroll(ca_path, *, recovery_verified=False):
             raise
 
 
-if __name__ == '__main__':
-    if len(sys.argv) in (3, 4) and sys.argv[1] == 'enroll' and sys.argv[3:] in ([], ['--recovery-verified']):
+def run_cli(args):
+    """分发独立脚本和完整发布包共用的设备端子命令。"""
+    if len(args) in (2, 3) and args[0] == 'enroll' and args[2:] in ([], ['--recovery-verified']):
         try:
-            enroll(Path(sys.argv[2]), recovery_verified=len(sys.argv) == 4)
+            enroll(Path(args[1]), recovery_verified=len(args) == 3)
         except SshManagementError as exc:
             sys.exit(str(exc))
         except (OSError, ValueError, requests.RequestException):
             sys.exit('首次纳管失败，请核对纳管文件格式、平台证书和设备网络')
         print('首次纳管配置已就绪，重启 device-agent 后核对专用心跳')
-    elif len(sys.argv) == 3 and sys.argv[1] == 'rollback':
-        manager = SshManagement(sys.argv[2], load_enrollment=False)
+    elif len(args) == 2 and args[0] == 'rollback':
+        manager = SshManagement(args[1], load_enrollment=False)
         with manager.lock():
             state = manager.load_state()
             if state['mode'] == 'pending' and state['pending']['until'] <= time.time():
                 manager.rollback(state)
     else:
         sys.exit('用法: ssh_management.py enroll <CA 文件> [--recovery-verified] < <纳管 JSON>')
+
+
+if __name__ == '__main__':
+    run_cli(sys.argv[1:])

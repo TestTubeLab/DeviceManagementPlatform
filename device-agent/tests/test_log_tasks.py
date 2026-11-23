@@ -459,7 +459,7 @@ class PollTests(unittest.TestCase):
         self.assertEqual(reports[-1], {'task_id': 6, 'status': 'failed', 'result': {},
                                        'error_message': 'permission denied'})
         self.assertEqual(reports[-2]['status'], 'failed')
-        self.assertEqual(agent.AGENT_VERSION, '1.7.3')
+        self.assertEqual(agent.AGENT_VERSION, '1.7.4')
 
 
 if __name__ == '__main__':

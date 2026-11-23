@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -14,6 +15,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from platform_release import ARCHIVE_NAME, DEFAULT_REPOSITORY, ReleaseError, latest_release, version_key
+
+UPDATE_BACKUP_RETENTION = 1
+UPDATE_BACKUP_ID = re.compile(r"^[a-f0-9]{32}$")
+ROLLBACK_TAG = re.compile(r"^device-platform-rollback:[a-f0-9]{32}$")
 
 
 class UpdateError(Exception):
@@ -181,6 +186,144 @@ class Updater:
         self.gate.unlink(missing_ok=True)
         self.status(transaction["job"], stage, message)
         self.journal.unlink(missing_ok=True)
+        if stage in {"succeeded", "rolled_back"}:
+            try:
+                self.cleanup_history()
+            except (OSError, ValueError, KeyError, UpdateError, subprocess.SubprocessError) as exc:
+                print(f"Update completed, but old history cleanup failed: {exc}", flush=True)
+
+    def cleanup_image_tag(self, tag, active_image_id, *, dry_run=False):
+        """Remove one updater-owned tag only when no container depends on its image."""
+        inspected = subprocess.run(
+            ["docker", "image", "inspect", tag, "--format", "{{.Id}}"],
+            check=False, capture_output=True, text=True, timeout=30,
+        )
+        if inspected.returncode != 0:
+            return
+        image_id = inspected.stdout.strip()
+        if not image_id or image_id == active_image_id:
+            return
+
+        containers = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", f"ancestor={image_id}"],
+            check=False, capture_output=True, text=True, timeout=30,
+        )
+        if containers.returncode != 0 or containers.stdout.strip():
+            return
+
+        if dry_run:
+            print(f"Would remove expired updater image tag {tag}", flush=True)
+            return
+
+        removed = subprocess.run(
+            ["docker", "image", "rm", tag],
+            check=False, capture_output=True, text=True, timeout=60,
+        )
+        if removed.returncode != 0:
+            print(f"Could not remove expired updater image tag {tag}: {removed.stderr[-1000:]}", flush=True)
+        else:
+            print(f"Removed expired updater image tag {tag}", flush=True)
+
+    def cleanup_history(self, *, dry_run=False):
+        """Retain one verified rollback snapshot and only its rollback image tag."""
+        backup_root = self.root / "backups"
+        if not backup_root.is_dir() or backup_root.is_symlink():
+            return
+
+        entries = []
+        orphaned = []
+        allowed = {"transaction.json", "before.sqlite3", "writing.sqlite3", "preflight"}
+        for path in backup_root.iterdir():
+            if (not UPDATE_BACKUP_ID.fullmatch(path.name) or path.is_symlink()
+                    or not path.is_dir()):
+                continue
+            children = list(path.iterdir())
+            if any(child.is_symlink() for child in children) or not {child.name for child in children} <= allowed:
+                continue
+
+            transaction_path = path / "transaction.json"
+            if not transaction_path.is_file():
+                if {child.name for child in children} <= {"preflight"}:
+                    orphaned.append(path)
+                continue
+            try:
+                transaction = read(transaction_path)
+                job = transaction["job"]
+                valid = (
+                    job["id"] == path.name
+                    and transaction["backup"] == str(path)
+                    and transaction["previous_image"] == f"device-platform-rollback:{path.name}"
+                    and (path / "before.sqlite3").is_file()
+                    and not (path / "before.sqlite3").is_symlink()
+                )
+                created_at = job["created_at"]
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if valid and isinstance(created_at, (int, float)):
+                entries.append((created_at, path, transaction))
+
+        entries.sort(key=lambda entry: (entry[0], entry[1].name), reverse=True)
+        retained = entries[:UPDATE_BACKUP_RETENTION]
+        retained_tags = {entry[2]["previous_image"] for entry in retained}
+        retained_versions = {
+            entry[2].get("previous_version") for entry in retained
+            if version_key(entry[2].get("previous_version") or "")
+        }
+
+        for _, path, transaction in entries[UPDATE_BACKUP_RETENTION:]:
+            if dry_run:
+                print(f"Would remove expired update backup {path.name}", flush=True)
+                continue
+            try:
+                shutil.rmtree(path)
+                print(f"Removed expired update backup {path.name}", flush=True)
+            except OSError as exc:
+                print(f"Could not remove expired update backup {path}: {exc}", flush=True)
+                retained_tags.add(transaction["previous_image"])
+                previous_version = transaction.get("previous_version")
+                if version_key(previous_version or ""):
+                    retained_versions.add(previous_version)
+        for path in orphaned:
+            if dry_run:
+                print(f"Would remove incomplete update backup {path.name}", flush=True)
+                continue
+            try:
+                shutil.rmtree(path)
+                print(f"Removed incomplete update backup {path.name}", flush=True)
+            except OSError as exc:
+                print(f"Could not remove incomplete update backup {path}: {exc}", flush=True)
+
+        try:
+            active = self.inspect(self.app_id())
+            active_image_id = active.get("Image", "")
+            active_version = (active.get("Config", {}).get("Labels") or {}).get(
+                "org.opencontainers.image.version", "",
+            )
+        except (KeyError, IndexError, UpdateError, subprocess.SubprocessError, OSError) as exc:
+            print(f"Could not inspect the active platform image; skipping image cleanup: {exc}", flush=True)
+            return
+
+        listed = subprocess.run(
+            ["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"],
+            check=False, capture_output=True, text=True, timeout=30,
+        )
+        if listed.returncode != 0:
+            print(f"Could not list updater image tags: {listed.stderr[-1000:]}", flush=True)
+            return
+
+        repository_prefix = f"ghcr.io/{self.repository.lower()}:"
+        for tag in set(listed.stdout.splitlines()):
+            if ROLLBACK_TAG.fullmatch(tag):
+                if tag not in retained_tags:
+                    self.cleanup_image_tag(tag, active_image_id, dry_run=dry_run)
+                continue
+
+            if not tag.startswith(repository_prefix):
+                continue
+            version = tag.removeprefix(repository_prefix)
+            if (version_key(version) and version not in retained_versions
+                    and version != active_version):
+                self.cleanup_image_tag(tag, active_image_id, dry_run=dry_run)
 
     def pull_release(self, release):
         if release.archive_digest:

@@ -80,6 +80,22 @@ jobs:
           IMAGE: ${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}
         run: bash deployment/deploy-simple/test-ssh-tls.sh "$IMAGE"
 
+      - name: Test host updater retention
+        run: PYTHONPATH=server/management python3 -m unittest discover -s deployment/updater -p 'test_*.py'
+
+      - name: Build and validate the complete device Agent
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          python3 device-agent/agent_release.py device-agent.pyz
+          sha256sum device-agent.pyz > device-agent.pyz.sha256
+          docker run --rm --network none --entrypoint bash -v "$PWD/device-agent.pyz:/tmp/device-agent.pyz:ro" "$IMAGE" -ec '
+            cd /app/device-agent
+            python -m unittest discover -s tests -t . -p "test_*.py"
+            python -I /tmp/device-agent.pyz --check
+          '
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -106,4 +122,5 @@ jobs:
           PY
           )"
           printf '\n\n<!-- dmp-image: %s -->\n' "$IMAGE_DIGEST" >> "$notes_file"
-          gh release create "$VERSION" device-platform-linux-amd64.tar.gz --verify-tag --title "$VERSION" --notes-file "$notes_file"
+          gh release create "$VERSION" device-platform-linux-amd64.tar.gz device-agent.pyz device-agent.pyz.sha256 \
+            --verify-tag --title "$VERSION" --notes-file "$notes_file"

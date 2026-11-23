@@ -18,6 +18,12 @@
 
 若切换失败，更新器在放行写入前恢复之前的数据库和镜像。查看 `sudo journalctl -u device-platform-updater` 可定位故障。若状态显示需要人工恢复，排除故障后运行 `sudo python3 /opt/device-platform-updater/apply.py /var/lib/device-platform-updater --retry-recovery`。备份位于 `/var/lib/device-platform-updater/backups/`，仅 root 可读。管理已接入的 Compose 项目时，将 `/var/lib/device-platform-updater/release-compose.json` 放在最后一个 `-f`。
 
-如果服务器下载镜像慢，可以在网络较快的机器下载 Release 镜像包，核对 GitHub API 提供的 SHA-256 后传到宿主机并运行 `docker load -i device-platform-linux-amd64.tar.gz`。下次点击更新时，更新器重新核对本地镜像 ID 与发布记录，一致才跳过下载。准备阶段平台继续服务。
+## 磁盘占用与保留
+
+更新成功或失败后已完成旧版回滚时，更新器只保留最近一次可回滚版本的 SQLite 快照和对应旧镜像标签。更早的更新快照、更新器生成的过期 `device-platform-rollback:*` 标签，以及本平台仓库中不再保留的旧版本镜像标签会被逐项清理。仅清理更新器 UUID 任务目录和本平台明确匹配的镜像标签，不运行全局 `docker image prune`，不清理其他项目镜像、容器或数据卷。清理失败会记入宿主机更新服务日志，不会把已健康运行的新版本标记为失败。
+
+清理只会在新版本健康检查通过，或旧版恢复并通过健康检查后进行；升级/回滚未完成时，恢复所需快照和镜像不会被清理。`/app/media` 媒体卷不会复制或删除。一次更新的稳定备份占用约为当前 SQLite 数据库快照大小；切换期间还需要临时空间容纳新镜像归档/镜像及新数据库快照。若单份 SQLite 数据库本身很大，保留一份仍会占用相应空间，应在更新前检查宿主机磁盘余量。
+
+日常发布必须通过「平台设置 → 检查更新 → 更新」完成。不要把手工下载、上传 Release 包或在服务器执行 `docker load` 当作常规更新流程。只有用户明确要求处理已确认的 GitHub 下载链路故障时，才可将经官方 Release 元数据 SHA-256 校验的包作为临时镜像缓存；之后仍须由平台内更新任务完成切换和健康检查。下载期间现有平台继续服务。
 
 平台更新接口使用现有 Token 登录鉴权。`GET /api/platform/release/` 返回当前版本、新版和任务状态，`?refresh=true` 立即检查。管理员向 `POST /api/platform/updates/` 提交 `{"version":"v1.8.0"}`，成功返回 `202`。版本变化或存在进行中任务返回 `409`，更新服务或 GitHub 不可用返回 `503`。

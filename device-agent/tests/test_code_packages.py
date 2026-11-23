@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 import zipfile
 
-from test_log_tasks import load_agent
+from .test_log_tasks import load_agent
 
 
 class CodePackageTests(unittest.TestCase):

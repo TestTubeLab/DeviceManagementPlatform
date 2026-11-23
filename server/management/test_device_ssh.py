@@ -104,6 +104,28 @@ class DeviceSshTests(APITestCase):
         self.device.refresh_from_db()
         self.assertFalse(self.device.config['pending_agent_update'])
 
+    def test_full_bundle_heartbeat_blocks_legacy_updates_without_enrollment(self):
+        device = Device.objects.create(device_id='DEV-bundled', config={'pending_agent_update': True})
+        url = f'/api/devices/{device.device_id}/'
+        response = self.client.post(url + 'heartbeat/', {
+            'agent_version': '1.7.4', 'agent_release_bundle': True,
+        }, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(response.data['command'], 'update_agent')
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self.client.post(url + 'update_agent/').status_code, 409)
+        device.refresh_from_db()
+        self.assertTrue(device.config['agent_release_bundle'])
+        self.assertFalse(device.config['pending_agent_update'])
+        self.client.post(url + 'heartbeat/', {'agent_version': '1.7.3'}, format='json')
+        self.assertEqual(self.client.post(url + 'update_agent/').status_code, 409)
+        # 保留旧版设备的单文件更新行为。
+        legacy = Device.objects.create(device_id='DEV-legacy')
+        legacy_url = f'/api/devices/{legacy.device_id}/'
+        self.assertEqual(self.client.post(legacy_url + 'update_agent/').status_code, 200)
+        response = self.client.post(legacy_url + 'heartbeat/', {'agent_version': '1.7.3'}, format='json')
+        self.assertEqual(response.data['command'], 'update_agent')
+
     @override_settings(DEVICE_SSH_MANAGEMENT_ENABLED=False)
     def test_released_entry_reports_disabled_without_opening_agent_or_writes(self):
         url = f'/api/devices/{self.device.device_id}/ssh-management/'

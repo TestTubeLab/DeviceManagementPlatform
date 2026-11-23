@@ -22,22 +22,16 @@ import logging
 import re
 import selectors
 import stat
+from zipimport import zipimporter
 from collections import deque
 from datetime import datetime, timezone
 
 # ==================== 日志配置 ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler('/var/log/device-agent.log'),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
-AGENT_VERSION = "1.7.3"  # Bounded journal tasks and business log access.
+BUNDLED_AGENT = isinstance(__loader__, zipimporter)
+AGENT_VERSION = "1.7.4"
 CLOUD_SERVER = os.getenv("CLOUD_SERVER", "http://your-server.com/api")
 DEVICE_ID_FILE = os.getenv("DEVICE_ID_FILE", "/etc/device-id")
 VERSION_FILE = os.getenv("VERSION_FILE", "/work/.version")
@@ -484,6 +478,8 @@ def send_heartbeat():
         **container_info,
         **health_info
     }
+    if BUNDLED_AGENT:
+        data["agent_release_bundle"] = True
     
     # 确保所有字符串都是正确的UTF-8编码
     def ensure_utf8(d):
@@ -525,15 +521,30 @@ def send_heartbeat():
 
 # ==================== FRP 内网穿透管理 ====================
 def get_local_frp_config_version():
-    """获取本地 FRP 配置版本"""
+    """向平台上报本地版本，必要时用 0 请求重下发已授权配置。"""
     version_file = "/etc/frp/.version"
     try:
-        if os.path.exists(version_file):
-            with open(version_file, 'r') as f:
-                return int(f.read().strip())
-    except:
-        pass
-    return 0
+        with open(version_file, 'r') as f:
+            version = int(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+    if version <= 0:
+        return 0
+
+    # 仅在 systemd 明确给出故障或停用状态时请求恢复，避免干扰 systemd 自身重试。
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", "-p", "ActiveState", "-p", "UnitFileState", FRP_SERVICE_NAME],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug("无法读取 frpc 状态: %s", exc)
+        return version
+    if result.returncode == 0:
+        states = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        if states.get("ActiveState") in {"inactive", "failed"} or states.get("UnitFileState") == "disabled":
+            return 0
+    return version
 
 
 def save_local_frp_config_version(version):
@@ -631,12 +642,9 @@ def ensure_frpc_binary():
 
 
 def ensure_frpc_service():
-    """确保 frpc systemd 服务存在"""
+    """确保 frpc 服务存在，并在重新启用 FRP 时恢复开机自启。"""
     service_file = f"/etc/systemd/system/{FRP_SERVICE_NAME}.service"
-    
-    if os.path.exists(service_file):
-        return True
-    
+
     service_content = f"""[Unit]
 Description=FRP Client Service
 After=network.target
@@ -652,16 +660,16 @@ WantedBy=multi-user.target
 """
     
     try:
-        with open(service_file, 'w') as f:
-            f.write(service_content)
-        
-        subprocess.run(["systemctl", "daemon-reload"], check=True, timeout=30)
+        if not os.path.exists(service_file):
+            with open(service_file, 'w') as f:
+                f.write(service_content)
+            subprocess.run(["systemctl", "daemon-reload"], check=True, timeout=30)
+            logger.info(f"frpc 服务已创建: {service_file}")
         subprocess.run(["systemctl", "enable", FRP_SERVICE_NAME], check=True, timeout=30)
-        logger.info(f"frpc 服务已创建: {service_file}")
         return True
-        
-    except Exception as e:
-        logger.error(f"创建 frpc 服务失败: {e}")
+
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.error(f"准备 frpc 服务失败: {e}")
         return False
 
 
@@ -924,8 +932,8 @@ def download_new_agent():
 
 def apply_agent_update():
     """应用 Agent 更新：下载新版本并重启服务"""
-    if has_managed_ssh_config():
-        logger.warning("SSH 已纳管，拒绝旧版单脚本更新；请通过可信运维入口升级完整 Agent")
+    if BUNDLED_AGENT or has_managed_ssh_config():
+        logger.warning("当前 Agent 需要通过可信运维入口升级完整发布包")
         return False
 
     logger.info("开始更新 Agent...")
@@ -2830,6 +2838,11 @@ def poll_and_execute_log_tasks():
 
 # ==================== 主循环 ====================
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[logging.FileHandler('/var/log/device-agent.log'), logging.StreamHandler()],
+    )
     device_id = get_device_id()
     if os.path.lexists(os.path.join(SSH_MANAGEMENT_ROOT, 'enrollment.json')):
         try:
@@ -2860,6 +2873,7 @@ def main():
     last_update_check = 0
     last_config_check = 0
     last_log_task_poll = 0
+    next_frp_recovery = 0.0
     
     while True:
         try:
@@ -2884,7 +2898,7 @@ def main():
                     apply_agent_update()
                 
                 # 🔥 处理 FRP 配置更新
-                if command.get("frp_update_required"):
+                if command.get("frp_update_required") and current_time >= next_frp_recovery:
                     frp_config = command.get("frp_config")
                     if frp_config:
                         logger.info("检测到 FRP 配置更新，开始应用...")
@@ -2893,9 +2907,11 @@ def main():
                             logger.info("FRP 配置更新成功")
                             report_frp_status("connected")
                         else:
+                            next_frp_recovery = time.time() + 30
                             logger.error(f"FRP 配置更新失败: {error}")
                             report_frp_status("error", error)
                 elif command.get("frp_disable_required"):
+                    next_frp_recovery = 0.0
                     logger.info("检测到 FRP 停用指令，开始关闭本地 frpc...")
                     success, error = disable_frp()
                     if success:
@@ -2941,7 +2957,7 @@ def main():
                 last_log_upload = current_time
             
             # 定时检查 Agent 更新（每小时）
-            if current_time - last_update_check >= UPDATE_CHECK_INTERVAL:
+            if not BUNDLED_AGENT and current_time - last_update_check >= UPDATE_CHECK_INTERVAL:
                 logger.debug("检查 Agent 更新...")
                 new_version = check_agent_update()
                 if new_version:

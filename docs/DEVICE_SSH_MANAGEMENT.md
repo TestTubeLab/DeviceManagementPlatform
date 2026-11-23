@@ -22,16 +22,16 @@
 
 ## 设备首次纳管
 
-Jetson 使用 systemd、OpenSSH、iproute2、Python 和 Agent 已有的 `requests`。部署流程或本机控制台须有授权的 root 权限。先确认目标 Agent 基线、目标设备 ID、现有 FRP 入口和视觉服务健康，备份已运行的 Agent。通过可信发布渠道一起交付兼容的 `device-agent.py` 和 `ssh_management.py`，将它们分别安装为 `/opt/device-agent/agent.py` 和 `/opt/device-agent/ssh_management.py`，所有者为 root，普通账号不可写。
+Jetson 使用 systemd、OpenSSH、iproute2、Python 和 Agent 已有的依赖。先确认目标设备 ID、当前 Agent、FRP 入口和视觉服务健康。在可信的特权入口，按 [完整 Agent 发布包](../device-agent/README.md#完整-agent-发布包) 安装，然后执行下列命令。安装不会触发纳管或更改 SSH 策略。仍在使用旧双文件部署时，纳管子命令的入口是 `/opt/device-agent/ssh_management.py`。
 
 ```bash
-python3 /opt/device-agent/ssh_management.py enroll ca.crt < enrollment.json
+python3 /opt/device-agent/agent.py enroll ca.crt < enrollment.json
 systemctl restart device-agent
 ```
 
 纳管命令核对本机设备 ID、账号、证书和逐设备凭据，仅写入本机纳管配置。核对页面首次专用心跳后，清理暂存的凭据文件。首次安装时仅在已经实际登录过独立恢复入口、且旧远程 SSH 入口的来源受限时追加 `--recovery-verified`。网页正常添加公钥和查看状态通过 Agent 管理通道执行。仅公钥服务对认证设定 3 次尝试和 20 秒登录时限，上线验收还应检查原 SSH 和 Web 映射。
 
-可信控制台可用 `python manage.py provision_device_ssh DEVICE_ID` 轮换设备凭据，或用 `--revoke` 撤销。轮换后从已有可信特权入口更新设备纳管凭据并重启 Agent，保留已生效策略和公钥。未纳管设备继续使用现有更新流程。已纳管设备拒绝旧 HTTP 单脚本更新，通过可信渠道更新完整 Agent。
+可信控制台可用 `python manage.py provision_device_ssh DEVICE_ID` 轮换设备凭据，或用 `--revoke` 撤销。轮换后从已有可信特权入口更新设备纳管凭据并重启 Agent，保留已生效策略和公钥。旧版未纳管设备继续使用现有更新流程；完整包和已纳管设备拒绝旧单脚本更新，从可信发行入口升级。
 
 ## 回退与验证
 

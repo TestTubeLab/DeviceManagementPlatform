@@ -1,6 +1,6 @@
 # Device Agent 说明文档
 
-当前 Agent 版本：`1.7.3`。本版本新增有界 journal 日志任务，并限制业务日志访问范围和资源消耗；不新增运行依赖。
+当前 Agent 版本：`1.7.4`。本版本在已有 FRP 心跳配置链路上增加服务状态核验与失败重试退避；只使用 Python 标准库及 Agent 原有的 `requests`、`psutil`，不新增运行依赖。
 
 新增日志功能保持 Python 3.8 兼容，路径包含关系和服务名后缀处理不依赖 Python 3.9 API。测试覆盖这些旧 API 边界；Python 3.8 语法解析检查不能替代目标设备的实际运行验证。
 
@@ -32,6 +32,7 @@
 | 文件 | 作用 | 当前定位 |
 | --- | --- | --- |
 | `device-agent.py` | 正式使用中的完整 Agent | 主体 |
+| `agent_release.py` | 构建并安装包含 SSH 管理模块的单文件发行包 | 完整包安装入口 |
 | `bootstrap-agent.py` | 早期零接触引导版本，只负责注册、等待部署、启动基础容器 | 历史兼容 / 参考 |
 | `install.sh` | 目录内静态安装脚本，会下载 `bootstrap-agent.py` | 旧入口 / 示例 |
 
@@ -46,6 +47,22 @@
 - 新逻辑：`/api/install.sh` + `device-agent.py`
 
 当前正式维护对象应当以 `device-agent.py` 为准。
+
+### 完整 Agent 发布包
+
+正式 Release 同时提供 `device-agent.pyz` 和 `device-agent.pyz.sha256`。完整包包含 Agent 和 SSH 管理模块，不需要修改原 `device-agent.service` 的启动路径，也不安装额外 Python 依赖。旧 Agent 的定时检查和平台「更新」仍按原方式提供单脚本，完整包不会从这条链路自动安装或降级。
+
+先从可信 Release 核对发版信息和摘要，再把文件放到目标设备仅 root 可写的暂存目录。先独立检查摘要，**通过后才运行 Python**，不能先运行包让它证明自己可信。选择没有项目部署或设备配置变更正在执行的窗口。需要替换的是已有的 root Agent，不要在未恢复可信的设备上引入新的纳管凭据。
+
+```bash
+sha256sum -c device-agent.pyz.sha256
+python3 -I device-agent.pyz install '<可信发行记录中的完整 SHA-256>'
+systemctl status device-agent.service --no-pager
+```
+
+安装前核对服务启动路径、归属权限和依赖。SSH 试登未结束时拒绝安装。安装时只短暂停止 Agent，原子替换 `/opt/device-agent/agent.py`，检查新主进程持续运行。失败会恢复并重启原 Agent，保留 `agent.py.previous` 供排查。验收时再确认平台出现新版心跳、原视觉服务仍健康以及既有 FRP 映射不变。SSH 管理的启用与逐设备凭据另见 [设备纳管](../docs/DEVICE_SSH_MANAGEMENT.md#设备首次纳管)。
+
+本地构建：`python device-agent/agent_release.py device-agent.pyz`。快速检查：`python -I device-agent.pyz --check`。运行完整测试：从仓库根目录执行 `python -m unittest discover -s DeviceManagementPlatform/device-agent/tests -t DeviceManagementPlatform/device-agent -p "test_*.py"`；安装与回退测试使用隔离的 root Linux 环境。
 
 ---
 
@@ -499,12 +516,14 @@ Agent 收到后会：
 
 1. 确保本地存在 `frpc` 二进制。
 2. 生成 `/etc/frp/frpc.ini`。
-3. 确保 `frpc` 的 `systemd` 服务存在。
+3. 确保 `frpc` 的 `systemd` 服务存在并启用开机自启。
 4. 重启 `frpc` 服务。
 5. 把本地 FRP 配置版本写到 `/etc/frp/.version`。
 6. 向云端上报 `connected / disconnected / error` 状态。
 
 如果云端要求停用 FRP，则会停止并禁用 `frpc` 服务。
+
+当 systemd 明确报告 `frpc` 停止、失败或未启用自启时，Agent 会在心跳中上报配置版本 `0`，请求平台重下发该设备已获准的配置。云端仍负责判断是否允许启用 FRP。下发配置应用失败时，Agent 至少等待 30 秒再尝试。
 
 当前服务端默认下发两条隧道：
 
@@ -523,7 +542,7 @@ Agent 收到后会：
 
 ---
 
-### 7.8 Agent 自更新
+### 7.8 旧版 Agent 自更新
 
 | 接口 | 方法 | 用途 |
 | --- | --- | --- |
@@ -533,12 +552,12 @@ Agent 收到后会：
 自更新流程很直接：
 
 1. 周期性查询版本。
-2. 如果服务端版本高于本地 `AGENT_VERSION`，下载新脚本。
+2. 如果服务端版本不同于本地 `AGENT_VERSION`，下载新脚本。
 3. 备份当前 `/opt/device-agent/agent.py`。
 4. 覆盖写入新版本。
 5. 重启 `device-agent` 服务。
 
-服务端也可以通过心跳响应中的 `command=update_agent` 主动触发这件事。
+服务端也可以通过心跳响应中的 `command=update_agent` 主动触发这件事。上述接口不用于完整发布包或已纳管设备，参见 [完整 Agent 发布包](#完整-agent-发布包)。
 
 ---
 
