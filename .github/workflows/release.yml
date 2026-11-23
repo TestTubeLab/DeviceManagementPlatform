@@ -75,6 +75,22 @@ jobs:
           done
           exit 1
 
+      - name: Validate the bundled host updater
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          docker run --rm --network none --entrypoint python "$IMAGE" -c '
+          from pathlib import Path
+          import os
+
+          root = Path("/opt/device-platform-updater-release")
+          assert (root / "VERSION").read_text().strip() == os.environ["VERSION"]
+          for name in ("apply.py", "daemon.py", "platform_release.py"):
+              compile((root / name).read_text(), str(root / name), "exec")
+          '
+
       - name: Validate platform-managed SSH over built-in TLS
         env:
           IMAGE: ${{ steps.release.outputs.image }}:${{ steps.release.outputs.version }}

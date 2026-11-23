@@ -8,11 +8,15 @@
 
 镜像包从 GitHub Release 下载时固定使用 HTTPS 与 HTTP/1.1，并对传输错误进行有限重试和断点续传。下载完成后仍必须同时通过归档大小、SHA-256、加载后的镜像标签和镜像 ID 校验；未通过校验的部分文件不会进入 Docker。
 
+每个正式版镜像同时包含该版本的宿主机更新器源码和版本标记。更新器只从已通过镜像 ID 校验的镜像提取源码，检查文件、版本和 Python 语法；应用切换并通过健康检查后才替换宿主机更新器文件，并由常驻服务原位重新加载。切换失败时会恢复旧应用和旧更新器文件。该过程属于同一个平台更新任务，不需要单独上传或手工替换更新器。
+
 ## 安装
 
 全新 Linux 主机安装 Docker Compose v2 后，在 `deployment/deploy-simple` 运行 `bash deploy.sh 8081`。命令保留已有 `.env`，启用宿主机更新服务，运行最新正式版。开发时可用 `DMP_SOURCE_BUILD=1 bash deploy.sh 8081` 从源码构建。
 
 已有简化版部署先执行 `sudo bash deployment/updater/install.sh <已有 Compose 目录> <已有项目名>`。对照 `docker compose ls` 核对目录和项目名，然后执行 `sudo python3 /opt/device-platform-updater/apply.py /var/lib/device-platform-updater --bootstrap v1.8.0`，版本填写最新正式版。
+
+现有主机首次启用“随 Release 同步宿主机更新器”时，需要在没有排队更新或未完成事务的前提下，将 `deployment/updater/install.sh` 安装的版本更新一次，并重启 `device-platform-updater.service`。这只重启宿主机更新守护进程，不重启平台容器或修改数据卷；完成后后续版本均由平台内更新任务同步更新器。
 
 ## 切换和恢复
 

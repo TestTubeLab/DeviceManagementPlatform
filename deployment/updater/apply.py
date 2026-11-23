@@ -19,17 +19,21 @@ from platform_release import ARCHIVE_NAME, DEFAULT_REPOSITORY, ReleaseError, lat
 UPDATE_BACKUP_RETENTION = 1
 UPDATE_BACKUP_ID = re.compile(r"^[a-f0-9]{32}$")
 ROLLBACK_TAG = re.compile(r"^device-platform-rollback:[a-f0-9]{32}$")
+UPDATER_IMAGE_DIR = "/opt/device-platform-updater-release"
+UPDATER_INSTALL_DIR = Path("/opt/device-platform-updater")
+UPDATER_FILES = ("platform_release.py", "apply.py", "daemon.py", "VERSION")
 
 
 class UpdateError(Exception):
     """An update step failed. Tool output stays in the host journal."""
 
 
-def write_file(path, content):
+def write_file(path, content, mode=0o600):
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as source:
         temporary = Path(source.name)
         try:
             source.write(content.encode("utf-8"))
+            os.fchmod(source.fileno(), mode)
             source.flush()
             os.fsync(source.fileno())
             os.replace(temporary, path)
@@ -77,6 +81,7 @@ class Updater:
         self.override = root / "release-compose.json"
         self.journal = root / "transaction.json"
         self.gate = self.shared / "maintenance"
+        self.updater_install_dir = UPDATER_INSTALL_DIR
         self.config = read(root / "config.json")
         self.repository = self.config.get("repository", DEFAULT_REPOSITORY)
         self.compose_args = ["docker", "compose", "--project-directory", self.config["project_directory"],
@@ -179,14 +184,34 @@ class Updater:
         save(self.override, restored_override)
         self.compose("up", "-d", "--no-deps", "--no-build", "--pull", "never", "app")
         self.wait_ready(transaction.get("previous_version"))
+        updater_backup = transaction.get("updater_backup")
+        updater_restore_error = None
+        if updater_backup:
+            try:
+                self.restore_updater_files(Path(updater_backup))
+            except (OSError, ValueError, UpdateError) as exc:
+                updater_restore_error = exc
+                print(f"Platform rollback succeeded but updater source restore failed: {exc}", flush=True)
         save(self.journal, {**transaction, "phase": "restored"})
-        self.finish(transaction, "rolled_back", "新版未通过，已恢复旧版和切换前数据库。")
+        message = "新版未通过，已恢复旧版和切换前数据库。"
+        if updater_restore_error:
+            message += "更新器代码恢复失败，备份仍保留，请检查宿主机更新服务日志。"
+        self.finish(
+            transaction, "rolled_back", message,
+            keep_updater_backup=bool(updater_restore_error),
+        )
 
-    def finish(self, transaction, stage, message=""):
+    def finish(self, transaction, stage, message="", *, keep_updater_backup=False):
         self.gate.unlink(missing_ok=True)
         self.status(transaction["job"], stage, message)
         self.journal.unlink(missing_ok=True)
         if stage in {"succeeded", "rolled_back"}:
+            updater_backup = transaction.get("updater_backup")
+            if updater_backup and not keep_updater_backup:
+                backup = Path(updater_backup)
+                if (backup.parent == self.root
+                        and re.fullmatch(r"updater-before-[a-f0-9]{32}", backup.name)):
+                    shutil.rmtree(backup, ignore_errors=True)
             try:
                 self.cleanup_history()
             except (OSError, ValueError, KeyError, UpdateError, subprocess.SubprocessError) as exc:
@@ -325,6 +350,127 @@ class Updater:
                     and version != active_version):
                 self.cleanup_image_tag(tag, active_image_id, dry_run=dry_run)
 
+    def stage_updater_from_image(self, image, version, destination):
+        """Extract and validate the updater bundled in the verified application image."""
+        destination.mkdir(mode=0o700)
+        container = ""
+        try:
+            container = command(
+                "docker", "create", "--network", "none", "--entrypoint", "/bin/true", image,
+            ).strip()
+            if not re.fullmatch(r"[0-9a-f]{12,64}", container):
+                raise UpdateError("Docker returned an invalid updater staging container ID")
+            for name in UPDATER_FILES:
+                command("docker", "cp", f"{container}:{UPDATER_IMAGE_DIR}/{name}", str(destination / name))
+        except Exception:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+        finally:
+            if container:
+                removed = subprocess.run(
+                    ["docker", "rm", container], check=False, capture_output=True, text=True, timeout=30,
+                )
+                if removed.returncode:
+                    print(f"Could not remove updater staging container {container}: {removed.stderr[-1000:]}", flush=True)
+
+        if {path.name for path in destination.iterdir()} != set(UPDATER_FILES):
+            shutil.rmtree(destination, ignore_errors=True)
+            raise UpdateError("Release image contains an incomplete updater package")
+        for name in UPDATER_FILES:
+            path = destination / name
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024 * 1024:
+                shutil.rmtree(destination, ignore_errors=True)
+                raise UpdateError(f"Invalid updater package file: {name}")
+        if (destination / "VERSION").read_text(encoding="utf-8").strip() != version:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise UpdateError("Updater package version does not match the release")
+        for name in UPDATER_FILES[:-1]:
+            path = destination / name
+            try:
+                compile(path.read_text(encoding="utf-8"), str(path), "exec")
+            except SyntaxError as exc:
+                shutil.rmtree(destination, ignore_errors=True)
+                raise UpdateError(f"Release updater source is invalid: {name}") from exc
+        return destination
+
+    def backup_updater_files(self, job_id):
+        """Keep the installed updater files so application rollback can restore them."""
+        if not UPDATE_BACKUP_ID.fullmatch(job_id):
+            raise UpdateError("Invalid update ID for updater backup")
+        if self.updater_install_dir.is_symlink() or not self.updater_install_dir.is_dir():
+            raise UpdateError("Host updater install directory is missing or unsafe")
+        backup = self.root / f"updater-before-{job_id}"
+        backup.mkdir(mode=0o700)
+        present = []
+        try:
+            for name in UPDATER_FILES:
+                source = self.updater_install_dir / name
+                if source.is_symlink():
+                    raise UpdateError(f"Installed updater file is not a regular file: {name}")
+                if source.exists():
+                    if not source.is_file():
+                        raise UpdateError(f"Installed updater file is not a regular file: {name}")
+                    shutil.copy2(source, backup / name)
+                    present.append(name)
+            if not set(UPDATER_FILES[:-1]) <= set(present):
+                raise UpdateError("Required host updater files are missing")
+            save(backup / "manifest.json", {"files": present})
+        except Exception:
+            shutil.rmtree(backup, ignore_errors=True)
+            raise
+        return backup
+
+    def restore_updater_files(self, backup, *, reload_daemon=True):
+        """Restore the previous updater package from its transaction backup."""
+        if (backup.parent != self.root
+                or not re.fullmatch(r"updater-before-[a-f0-9]{32}", backup.name)):
+            raise UpdateError("Updater backup path is outside the update state directory")
+        if backup.is_symlink() or not backup.is_dir():
+            raise UpdateError("Updater backup directory is missing or unsafe")
+        if self.updater_install_dir.is_symlink() or not self.updater_install_dir.is_dir():
+            raise UpdateError("Host updater install directory is missing or unsafe")
+        manifest_path = backup / "manifest.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise UpdateError("Updater backup manifest is missing or unsafe")
+        present = read(manifest_path).get("files")
+        if (not isinstance(present, list) or not all(isinstance(name, str) for name in present)
+                or len(present) != len(set(present)) or not set(present) <= set(UPDATER_FILES)):
+            raise UpdateError("Updater backup manifest is invalid")
+        if {path.name for path in backup.iterdir()} != set(present) | {"manifest.json"}:
+            raise UpdateError("Updater backup contains unexpected files")
+        marker = self.root / "updater-reload"
+        if reload_daemon:
+            marker.unlink(missing_ok=True)
+        for name in UPDATER_FILES:
+            destination = self.updater_install_dir / name
+            if destination.is_symlink():
+                raise UpdateError(f"Refusing to replace updater symlink: {name}")
+            if name in present:
+                source = backup / name
+                if source.is_symlink() or not source.is_file():
+                    raise UpdateError(f"Updater backup file is missing: {name}")
+                write_file(destination, source.read_text(encoding="utf-8"), mode=source.stat().st_mode & 0o777)
+            else:
+                destination.unlink(missing_ok=True)
+        if reload_daemon:
+            write_file(marker, "restored\n")
+
+    def install_updater_files(self, staged, backup, version):
+        """Install the image-verified updater and revert it if a file replacement fails."""
+        try:
+            for name in UPDATER_FILES:
+                destination = self.updater_install_dir / name
+                if destination.is_symlink():
+                    raise UpdateError(f"Refusing to replace updater symlink: {name}")
+                write_file(destination, (staged / name).read_text(encoding="utf-8"), mode=0o644)
+            write_file(self.root / "updater-reload", f"{version}\n")
+        except Exception as install_error:
+            try:
+                self.restore_updater_files(backup, reload_daemon=False)
+            except Exception as restore_error:
+                raise UpdateError("Updater install failed and its previous files could not be restored") from restore_error
+            raise UpdateError("Updater install failed; previous files were restored") from install_error
+
     def pull_release(self, release):
         if release.archive_digest:
             image = f"ghcr.io/{self.repository.lower()}:{release.version}"
@@ -415,25 +561,36 @@ class Updater:
             for item in smoke.iterdir():
                 item.unlink()
             smoke.rmdir()
-        previous = f"device-platform-rollback:{job['id']}"
-        command("docker", "image", "tag", current["Image"], previous)
-        transaction = {"job": job, "backup": str(backup), "database": str(database),
-                       "previous_version": old_version if version_key(old_version or "") else None,
-                       "previous_image": previous, "previous_override": read(self.override), "phase": "switching"}
-        save(backup / "transaction.json", transaction)
-        save(self.journal, transaction)
-        self.status(job, "switching")
-        self.gate.touch(mode=0o644, exist_ok=True)
-        self.gate.chmod(0o644)
-        self.compose("stop", "-t", "25", "app")
-        snapshot(database, backup / "writing.sqlite3")
-        os.replace(backup / "writing.sqlite3", backup / "before.sqlite3")
-        self.select_image(image)
-        self.compose("up", "-d", "--no-deps", "--no-build", "--pull", "never", "app")
-        self.wait_ready(release.version)
-        # Commit before traffic resumes. Crash recovery must never restore after that point.
-        save(self.journal, {**transaction, "phase": "committed"})
-        self.finish(transaction, "succeeded")
+        updater_staging = self.root / f"updater-stage-{job['id']}"
+        updater_backup = None
+        try:
+            self.stage_updater_from_image(image, release.version, updater_staging)
+            updater_backup = self.backup_updater_files(job["id"])
+            previous = f"device-platform-rollback:{job['id']}"
+            command("docker", "image", "tag", current["Image"], previous)
+            transaction = {"job": job, "backup": str(backup), "database": str(database),
+                           "previous_version": old_version if version_key(old_version or "") else None,
+                           "previous_image": previous, "previous_override": read(self.override),
+                           "updater_backup": str(updater_backup), "phase": "switching"}
+            save(backup / "transaction.json", transaction)
+            save(self.journal, transaction)
+            self.status(job, "switching")
+            self.gate.touch(mode=0o644, exist_ok=True)
+            self.gate.chmod(0o644)
+            self.compose("stop", "-t", "25", "app")
+            snapshot(database, backup / "writing.sqlite3")
+            os.replace(backup / "writing.sqlite3", backup / "before.sqlite3")
+            self.select_image(image)
+            self.compose("up", "-d", "--no-deps", "--no-build", "--pull", "never", "app")
+            self.wait_ready(release.version)
+            self.install_updater_files(updater_staging, updater_backup, release.version)
+            # Commit before traffic resumes. Crash recovery must never restore after that point.
+            save(self.journal, {**transaction, "phase": "committed"})
+            self.finish(transaction, "succeeded")
+        finally:
+            shutil.rmtree(updater_staging, ignore_errors=True)
+            if updater_backup and not self.journal.exists():
+                shutil.rmtree(updater_backup, ignore_errors=True)
 
     def recover(self):
         transaction = read(self.journal)

@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from apply import read, save
+from apply import read, save, write_file
 from platform_release import DEFAULT_REPOSITORY, ReleaseError, latest_release
 
 ROOT = Path(os.environ.get("DMP_UPDATE_ROOT", "/var/lib/device-platform-updater"))
@@ -16,6 +16,20 @@ APPLY = Path("/opt/device-platform-updater/apply.py")
 
 def write_status():
     save(SHARED / "worker.json", {"checked_at": int(time.time())})
+
+
+def reload_after_updater_sync():
+    marker = ROOT / "updater-reload"
+    if marker.is_symlink() or not marker.is_file():
+        return
+    version = marker.read_text(encoding="utf-8").strip()
+    marker.unlink()
+    print(f"Reloading host updater after syncing release {version}", flush=True)
+    try:
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())])
+    except OSError as exc:
+        write_file(marker, f"{version}\n")
+        print(f"Could not reload host updater yet: {exc}", flush=True)
 
 
 def check_release():
@@ -38,9 +52,11 @@ def check_release():
 
 def main():
     SHARED.mkdir(mode=0o700, parents=True, exist_ok=True)
+    reload_after_updater_sync()
     next_check = 0
     while True:
         try:
+            reload_after_updater_sync()
             write_status()
             status_path = SHARED / "status.json"
             status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
@@ -55,6 +71,7 @@ def main():
                 )
                 if result.returncode:
                     print(f"updater task exited with code {result.returncode}", flush=True)
+                reload_after_updater_sync()
             if time.monotonic() >= next_check:
                 check_release()
                 next_check = time.monotonic() + 300

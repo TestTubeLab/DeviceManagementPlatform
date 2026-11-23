@@ -44,6 +44,11 @@ COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 # 复制后端代码
 COPY server/ /app/
 
+# The verified release image also carries the host updater source.
+COPY deployment/updater/apply.py deployment/updater/daemon.py /opt/device-platform-updater-release/
+COPY server/management/platform_release.py /opt/device-platform-updater-release/
+RUN printf '%s\n' "$DMP_VERSION" > /opt/device-platform-updater-release/VERSION
+
 # 复制 device-agent 脚本（供下载）
 COPY device-agent/ /app/device-agent/
 
