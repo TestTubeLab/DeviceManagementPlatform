@@ -81,7 +81,7 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         shell: bash
         run: |
-          docker run --rm --network none --entrypoint python "$IMAGE" -c '
+          docker run --rm --network none --env VERSION --entrypoint python "$IMAGE" -c '
           from pathlib import Path
           import os
 
