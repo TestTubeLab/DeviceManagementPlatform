@@ -348,8 +348,11 @@ class Updater:
         """Load a checked GitHub Release asset without private registry credentials."""
         with tempfile.TemporaryDirectory(prefix="download-", dir=self.root) as directory:
             target = Path(directory) / ARCHIVE_NAME
-            command("curl", "--fail", "--silent", "--show-error", "--location",
+            target.touch(mode=0o600)
+            command("curl", "--fail", "--silent", "--show-error", "--location", "--http1.1",
                     "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15", "--max-time", "14400",
+                    "--retry", "8", "--retry-all-errors", "--retry-delay", "3", "--retry-max-time", "14400",
+                    "--continue-at", "-",
                     "--header", "Accept: application/octet-stream",
                     "--max-filesize", str(release.archive_size), "--output", str(target),
                     f"https://api.github.com/repos/{self.repository}/releases/assets/{release.archive_id}"

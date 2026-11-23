@@ -6,6 +6,8 @@
 
 推送测试通过的代码和一个新的正式版本标签，例如 `v1.8.0`。使用附注标签时，把更新说明写在标签消息正文。GitHub Actions 构建 Linux amd64 镜像并发布 GitHub Release。服务器使用 Release 的镜像包，检查 GitHub API 提供的 SHA-256 摘要后再加载。
 
+镜像包从 GitHub Release 下载时固定使用 HTTPS 与 HTTP/1.1，并对传输错误进行有限重试和断点续传。下载完成后仍必须同时通过归档大小、SHA-256、加载后的镜像标签和镜像 ID 校验；未通过校验的部分文件不会进入 Docker。
+
 ## 安装
 
 全新 Linux 主机安装 Docker Compose v2 后，在 `deployment/deploy-simple` 运行 `bash deploy.sh 8081`。命令保留已有 `.env`，启用宿主机更新服务，运行最新正式版。开发时可用 `DMP_SOURCE_BUILD=1 bash deploy.sh 8081` 从源码构建。
