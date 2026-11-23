@@ -7,6 +7,7 @@ export interface UpdateJob {
   version: string
   status: 'queued' | 'preparing' | 'switching' | 'rolling_back' | 'succeeded' | 'failed' | 'rolled_back' | 'recovery_required'
   created_at: number
+  updated_at?: number
   actor: string
   message?: string
 }

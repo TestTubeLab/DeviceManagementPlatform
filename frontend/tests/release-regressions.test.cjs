@@ -26,6 +26,7 @@ function harness() {
   const downloads = []
   const route = vue.reactive({ params: { id: 'DEV-A' } })
   const store = vue.reactive({ currentDevice: { device_id: 'DEV-A', name: 'saved', location: 'site', group: 'group', is_online: true } })
+  const releaseStore = vue.reactive({ info: null, loading: false, unavailable: false, async load() {}, async apply() {} })
   const io = {
     post: async () => ({ task_id: 'uuid-task', message: 'created' }),
     patch: async () => ({}),
@@ -43,6 +44,11 @@ function harness() {
   const mocks = {
     vue: { ...vue, onMounted() {}, onUnmounted: callback => unmounted.push(callback) },
     'vue-router': { useRoute: () => route, useRouter: () => ({ push() {} }) },
+    '@/api/auth': { getStoredUser: () => ({ is_staff: true }) },
+    '@/stores/platformRelease': {
+      isUpdateRunning: job => !!job && ['queued', 'preparing', 'switching', 'rolling_back'].includes(job.status),
+      usePlatformRelease: () => releaseStore,
+    },
     '@element-plus/icons-vue': {},
     'element-plus': {
       ElMessage: Object.fromEntries(['success', 'error', 'warning', 'info'].map(level => [level, message => messages.push({ level, message })])),
@@ -88,7 +94,7 @@ function harness() {
     'showEditDialog', 'editForm', 'deviceGroup', 'deviceGroupDirty', 'handleGroupChange', 'viewConfigDetail',
   ].join(',')).probe
   return {
-    io, posts, gets, store, route, messages, downloads, detail, load, mocks,
+    io, posts, gets, store, route, messages, downloads, detail, load, mocks, releaseStore,
     get alert() { return alert }, get now() { return now },
     async open() { const page = detail(); page.logTree.value = [{ id: 'cached' }]; page.showLogsCenterDialog.value = true; await flush(); return page },
     async advance(ms) {
@@ -104,6 +110,36 @@ function harness() {
     dispose() { for (const callback of unmounted) callback(); scope.stop() },
   }
 }
+
+test('platform update progress exposes truthful preparation, switch and rollback stages', t => {
+  const app = harness(); t.after(() => app.dispose())
+  const { getUpdateProgress } = app.load('views/PlatformSettings.vue', 'getUpdateProgress').probe
+  const template = parse(fs.readFileSync(path.join(sourceRoot, 'views/PlatformSettings.vue'), 'utf8')).descriptor.template.content
+
+  assert.equal(JSON.stringify(getUpdateProgress({ status: 'queued' })), JSON.stringify({
+    activeStep: 0, title: '更新任务已排队', detail: '宿主机更新器即将开始处理。',
+  }))
+  assert.equal(JSON.stringify(getUpdateProgress({ status: 'preparing' })), JSON.stringify({
+    activeStep: 0,
+    title: '正在准备更新',
+    detail: '正在下载并校验发布镜像，随后预检数据库迁移。此阶段旧版平台继续运行。',
+  }))
+  assert.equal(JSON.stringify(getUpdateProgress({ status: 'switching' })), JSON.stringify({
+    activeStep: 1,
+    title: '正在切换平台服务',
+    detail: '镜像与数据库预检已通过，正在备份数据库、切换应用容器并等待健康检查。此阶段服务可能短暂中断。',
+  }))
+  assert.equal(JSON.stringify(getUpdateProgress({ status: 'rolling_back' })), JSON.stringify({
+    activeStep: 1,
+    title: '正在恢复上一版本',
+    detail: '新版本未通过健康检查，正在恢复原应用容器和数据库。请保持页面打开，等待恢复结果。',
+  }))
+  assert.match(template, /title="下载镜像并预检"/)
+  assert.match(template, /title="切换并验证"/)
+  assert.match(template, /role="progressbar"/)
+  assert.match(template, /阶段开始于/)
+  assert.doesNotMatch(template, /percentage/)
+})
 
 test('configuration history renders untrusted keys and values as text', async t => {
   const app = harness(); t.after(() => app.dispose())

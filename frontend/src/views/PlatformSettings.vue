@@ -15,8 +15,27 @@
         <el-descriptions-item label="最近检查">{{ formatTime(info?.checked_at) }}</el-descriptions-item>
       </el-descriptions>
 
-      <el-alert v-if="running" class="notice" type="info" :closable="false"
-        :title="release.unavailable ? '平台正在切换，正在等待服务恢复…' : labels[info!.job!.status]" />
+      <div v-if="running && info?.job" class="update-progress notice" role="status" aria-live="polite">
+        <div class="card-heading">
+          <strong>{{ release.unavailable ? '正在重新连接更新状态' : progress.title }}</strong>
+          <el-tag size="small" type="warning">{{ labels[info.job.status] }}</el-tag>
+        </div>
+        <el-steps :active="progress.activeStep" finish-status="success" simple>
+          <el-step title="下载镜像并预检" />
+          <el-step title="切换并验证" />
+        </el-steps>
+        <div class="update-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+          :aria-valuetext="`${labels[info.job.status]}，${release.unavailable ? '状态暂不可用，正在重试' : progress.detail}`">
+          <span />
+        </div>
+        <p>{{ release.unavailable ? '暂时无法读取任务状态，页面正在自动重试；更新阶段可能造成短暂不可访问。' : progress.detail }}</p>
+        <small>任务 {{ info.job.id }} · 阶段开始于 {{ formatTime(info.job.updated_at || info.job.created_at) }}</small>
+      </div>
+      <el-alert v-else-if="info?.job?.status === 'rolled_back'" class="notice" type="warning" :closable="false"
+        :title="`${labels[info.job.status]}${info.job.message ? ` · ${info.job.message}` : ''}`" />
+      <el-alert v-else-if="info?.job?.status === 'failed' || info?.job?.status === 'recovery_required'" class="notice"
+        type="error" :closable="false"
+        :title="`${labels[info.job.status]}${info.job.message ? ` · ${info.job.message}` : ''}`" />
       <el-alert v-else-if="release.unavailable || info?.check_failed" class="notice" type="warning"
         :closable="false" title="暂时无法检查更新，请稍后重试。" />
       <el-alert v-else-if="info && !info.updater_ready && canUpdate" class="notice" type="warning"
@@ -34,7 +53,7 @@
         <pre v-if="info.latest.notes">{{ info.latest.notes }}</pre>
       </div>
 
-      <div v-if="info?.job" class="notice" role="status">
+      <div v-if="info?.job && !running" class="notice" role="status">
         <strong>最近更新 {{ info.job.version }}</strong>
         <p>{{ labels[info.job.status] }}{{ info.job.message ? ` · ${info.job.message}` : '' }}</p>
       </div>
@@ -69,6 +88,31 @@ const labels: Record<UpdateJob['status'], string> = {
   rolled_back: '更新失败，已恢复上一版本',
   recovery_required: '自动恢复未通过，请检查宿主机',
 }
+const progress = computed(() => getUpdateProgress(info.value?.job))
+
+function getUpdateProgress(job?: UpdateJob | null) {
+  if (job?.status === 'switching') {
+    return {
+      activeStep: 1,
+      title: '正在切换平台服务',
+      detail: '镜像与数据库预检已通过，正在备份数据库、切换应用容器并等待健康检查。此阶段服务可能短暂中断。',
+    }
+  }
+  if (job?.status === 'rolling_back') {
+    return {
+      activeStep: 1,
+      title: '正在恢复上一版本',
+      detail: '新版本未通过健康检查，正在恢复原应用容器和数据库。请保持页面打开，等待恢复结果。',
+    }
+  }
+  return {
+    activeStep: 0,
+    title: job?.status === 'queued' ? '更新任务已排队' : '正在准备更新',
+    detail: job?.status === 'queued'
+      ? '宿主机更新器即将开始处理。'
+      : '正在下载并校验发布镜像，随后预检数据库迁移。此阶段旧版平台继续运行。',
+  }
+}
 
 const formatTime = (timestamp?: number | null) =>
   timestamp ? new Date(timestamp * 1000).toLocaleString() : '—'
@@ -102,6 +146,25 @@ async function confirmUpdate() {
 .platform-settings h2 { margin: 0 0 20px; }
 .card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .notice, .release-details { margin-top: 16px; }
+.update-progress { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--el-border-color); border-radius: 4px; }
+.update-progress-track { height: 8px; overflow: hidden; background: var(--el-fill-color); border-radius: 4px; }
+.update-progress-track span {
+  display: block;
+  width: 32%;
+  height: 100%;
+  background: var(--el-color-primary);
+  border-radius: inherit;
+  animation: update-progress-slide 1.8s ease-in-out infinite alternate;
+}
+@keyframes update-progress-slide {
+  from { transform: translateX(0); }
+  to { transform: translateX(212%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-progress-track span { animation: none; transform: translateX(106%); }
+}
+.update-progress p { margin: 0; color: var(--el-text-color-regular); }
+.update-progress small { color: var(--el-text-color-secondary); overflow-wrap: anywhere; }
 .release-details a { color: var(--el-color-primary); }
 .release-details pre {
   white-space: pre-wrap;
