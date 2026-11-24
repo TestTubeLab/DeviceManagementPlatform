@@ -199,10 +199,11 @@
           </el-descriptions-item>
           <el-descriptions-item label="SSH 命令">
             <div style="display: flex; align-items: center; gap: 8px">
-              <code style="font-family: monospace; background: #f5f7fa; padding: 4px 8px; border-radius: 4px">
+              <code v-if="device.frp_public_access && sshCommand" style="font-family: monospace; background: #f5f7fa; padding: 4px 8px; border-radius: 4px">
                 {{ sshCommand }}
               </code>
-              <el-button type="primary" link size="small" @click="copySshCommand">
+              <span v-else class="remote-tunnel-hint">公网直连已关闭，请通过 jetson_remote 管理隧道访问</span>
+              <el-button v-if="device.frp_public_access && sshCommand" type="primary" link size="small" @click="copySshCommand">
                 复制
               </el-button>
             </div>
@@ -210,9 +211,9 @@
           <el-descriptions-item v-if="device.frp_web_port" label="Web 端口">
             <span style="font-family: monospace; font-weight: 600; color: #409EFF">{{ device.frp_web_port }}</span>
           </el-descriptions-item>
-          <el-descriptions-item v-if="device.web_access_url" label="Web 访问">
+          <el-descriptions-item v-if="device.frp_web_port" label="Web 访问">
             <div style="display: flex; align-items: center; gap: 8px">
-              <a
+              <a v-if="device.frp_public_access && device.web_access_url"
                 :href="device.web_access_url"
                 target="_blank"
                 rel="noopener noreferrer"
@@ -220,7 +221,8 @@
               >
                 {{ device.web_access_url }}
               </a>
-              <el-button type="primary" link size="small" @click="copyWebUrl">
+              <span v-else class="remote-tunnel-hint">公网直连已关闭，请通过 jetson_remote 管理隧道访问</span>
+              <el-button v-if="device.frp_public_access && device.web_access_url" type="primary" link size="small" @click="copyWebUrl">
                 复制
               </el-button>
             </div>
@@ -1500,6 +1502,11 @@ watch([() => route.params.id, () => device.value?.device_id], () => {
   font-size: 16px;
   font-weight: 600;
   color: #303133;
+}
+
+.remote-tunnel-hint {
+  color: #909399;
+  font-size: 13px;
 }
 
 /* 服务状态样式 */

@@ -117,28 +117,64 @@ test('platform update progress exposes truthful preparation, switch and rollback
   const template = parse(fs.readFileSync(path.join(sourceRoot, 'views/PlatformSettings.vue'), 'utf8')).descriptor.template.content
 
   assert.equal(JSON.stringify(getUpdateProgress({ status: 'queued' })), JSON.stringify({
-    activeStep: 0, title: '更新任务已排队', detail: '宿主机更新器即将开始处理。',
+    activeStep: 0, title: '更新任务已排队', detail: '宿主机更新器即将开始处理。', downloading: false, downloadPercent: 0,
   }))
   assert.equal(JSON.stringify(getUpdateProgress({ status: 'preparing' })), JSON.stringify({
     activeStep: 0,
     title: '正在准备更新',
-    detail: '正在下载并校验发布镜像，随后预检数据库迁移。此阶段旧版平台继续运行。',
+    detail: '正在准备发布镜像，随后会预检数据库迁移。此阶段旧版平台继续运行。',
+    downloading: false,
+    downloadPercent: 0,
+  }))
+  assert.equal(JSON.stringify(getUpdateProgress({
+    status: 'preparing', phase: 'download', downloaded_bytes: 45_000_000, total_bytes: 90_000_000,
+    download_percent: 50, download_speed_bytes_per_second: 128_000, download_idle_seconds: 18,
+  })), JSON.stringify({
+    activeStep: 0,
+    title: '正在下载发布镜像',
+    detail: '正在准备发布镜像，随后会预检数据库迁移。此阶段旧版平台继续运行。',
+    downloading: true,
+    downloadPercent: 50,
   }))
   assert.equal(JSON.stringify(getUpdateProgress({ status: 'switching' })), JSON.stringify({
-    activeStep: 1,
+    activeStep: 2,
     title: '正在切换平台服务',
     detail: '镜像与数据库预检已通过，正在备份数据库、切换应用容器并等待健康检查。此阶段服务可能短暂中断。',
+    downloading: false,
+    downloadPercent: 0,
   }))
   assert.equal(JSON.stringify(getUpdateProgress({ status: 'rolling_back' })), JSON.stringify({
-    activeStep: 1,
+    activeStep: 2,
     title: '正在恢复上一版本',
     detail: '新版本未通过健康检查，正在恢复原应用容器和数据库。请保持页面打开，等待恢复结果。',
+    downloading: false,
+    downloadPercent: 0,
   }))
-  assert.match(template, /title="下载镜像并预检"/)
+  assert.match(template, /title="下载并校验镜像"/)
   assert.match(template, /title="切换并验证"/)
   assert.match(template, /role="progressbar"/)
+  assert.match(template, /:percentage="progress\.downloadPercent"/)
+  assert.match(template, /downloaded_bytes/)
+  assert.match(template, /download_speed_bytes_per_second/)
+  assert.match(template, /download_idle_seconds/)
   assert.match(template, /阶段开始于/)
-  assert.doesNotMatch(template, /percentage/)
+})
+
+test('FRP public access is separate from the remote loopback management tunnel', () => {
+  const page = fs.readFileSync(path.join(sourceRoot, 'views/FrpManage.vue'), 'utf8')
+  const detail = fs.readFileSync(path.join(sourceRoot, 'views/DeviceDetail.vue'), 'utf8')
+  const updater = fs.readFileSync(path.resolve(__dirname, '../../deployment/updater/daemon.py'), 'utf8')
+  const backend = fs.readFileSync(path.resolve(__dirname, '../../server/management/views.py'), 'utf8')
+
+  assert.match(page, /label="公网直连"/)
+  assert.match(page, /关闭公网直连不会关闭 FRP 隧道；仍可通过 jetson_remote 经 212 回环转发管理设备。/)
+  assert.match(page, /setFrpPublicAccess\(row\.device_id, enabled\)/)
+  assert.match(page, /row\.frp_public_access && row\.ssh_connection_string/)
+  assert.match(detail, /device\.frp_public_access && device\.web_access_url/)
+  assert.match(detail, /公网直连已关闭，请通过 jetson_remote 管理隧道访问/)
+  assert.match(updater, /"!", "-i", "lo"/)
+  assert.match(updater, /action = "ACCEPT" if public_access else "DROP"/)
+  assert.match(backend, /def plan_frp_port_assignments\(frp_config\):[\s\S]*?Keep every stored pair fixed/)
 })
 
 test('configuration history renders untrusted keys and values as text', async t => {

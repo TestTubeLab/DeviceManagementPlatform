@@ -50,8 +50,11 @@ export interface Device {
   frp_enabled?: boolean
   frp_ssh_port?: number | null
   frp_web_port?: number | null
+  frp_public_access?: boolean
   frp_status?: FrpStatus
   frp_last_check?: string | null
+  frp_stop_requested_at?: string | null
+  can_reassign_ports?: boolean
   frp_error_message?: string
   ssh_connection_string?: string | null
   web_access_url?: string | null
@@ -66,6 +69,7 @@ export interface FrpConfig {
   port_pool_end: number
   is_active: boolean
   config_version: number
+  firewall_revision: number
   description: string
   available_ports: number[]
   total_ports: number
@@ -87,6 +91,15 @@ export interface FrpOverview {
   config: FrpConfig
   service: FrpService
   devices: Device[]
+  firewall: {
+    state: 'applied' | 'pending' | 'error' | 'unavailable'
+    controller_ready: boolean
+    policy_applied: boolean
+    requested_revision: number
+    applied_revision: number | null
+    heartbeat_at: number | null
+    error: string
+  }
   message?: string
   backup_path?: string
 }

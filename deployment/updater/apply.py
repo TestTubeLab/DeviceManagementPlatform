@@ -95,9 +95,25 @@ class Updater:
     def compose(self, *args, timeout=180):
         return command(*self.compose_args, *args, timeout=timeout)
 
-    def status(self, job, stage, message=""):
-        save(self.shared / "status.json", {**job, "status": stage, "message": message,
-                                            "updated_at": int(time.time())})
+    def status(self, job, stage, message="", **details):
+        now = int(time.time())
+        status_path = self.shared / "status.json"
+        previous = read(status_path) if status_path.exists() else {}
+        phase = details.get("phase")
+        same_phase = (
+            previous.get("id") == job.get("id")
+            and previous.get("status") == stage
+            and previous.get("phase") == phase
+        )
+        save(status_path, {
+            **job,
+            "status": stage,
+            "message": message,
+            "updated_at": now,
+            "phase": phase,
+            "phase_started_at": previous.get("phase_started_at", now) if same_phase else now,
+            **details,
+        })
 
     def select_image(self, image):
         save(self.override, {"services": {"app": {
@@ -471,7 +487,7 @@ class Updater:
                 raise UpdateError("Updater install failed and its previous files could not be restored") from restore_error
             raise UpdateError("Updater install failed; previous files were restored") from install_error
 
-    def pull_release(self, release):
+    def pull_release(self, release, job=None):
         if release.archive_digest:
             image = f"ghcr.io/{self.repository.lower()}:{release.version}"
             # Skip transfer when the exact published image is already in the local daemon.
@@ -480,29 +496,138 @@ class Updater:
                 check=False, capture_output=True, text=True, timeout=15,
             )
             if local.returncode != 0 or local.stdout.strip() != release.digest:
-                image = self.load_release_archive(release)
+                image = self.load_release_archive(release, job)
+            elif job:
+                self.status(
+                    job,
+                    "preparing",
+                    "本机已存在摘要匹配的发布镜像，跳过归档下载。",
+                    phase="cached_image",
+                )
         else:
+            if job:
+                self.status(
+                    job,
+                    "preparing",
+                    "发布未提供可校验的镜像归档，正在从镜像仓库拉取；此路径暂不提供字节级进度。",
+                    phase="registry_pull",
+                )
             image = release.image(self.repository)
             command("docker", "pull", image, timeout=600)
+        if job:
+            self.status(
+                job,
+                "preparing",
+                "正在核对镜像版本标签。",
+                phase="verify_image",
+            )
         label = command("docker", "image", "inspect", image, "--format",
                         '{{index .Config.Labels "org.opencontainers.image.version"}}').strip()
         if label != release.version:
             raise UpdateError("Release does not match the image version label")
         return image
 
-    def load_release_archive(self, release):
+    def _download_release_archive(self, arguments, target, release, job):
+        """下载归档时按实际文件增长量发布进度，避免猜测传输百分比。"""
+
+        initial_size = min(target.stat().st_size, release.archive_size)
+        last_progress_at = int(time.time())
+        self.status(
+            job,
+            "preparing",
+            "正在从 GitHub Release 下载发布镜像归档。",
+            phase="download",
+            downloaded_bytes=initial_size,
+            total_bytes=release.archive_size,
+            download_percent=round(initial_size * 100 / release.archive_size, 1),
+            download_speed_bytes_per_second=0,
+            download_last_progress_at=last_progress_at,
+        )
+        process = subprocess.Popen(
+            arguments,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        started = time.monotonic()
+        deadline = started + 14410
+        last_sample_size = initial_size
+        samples = [(started, initial_size)]
+
+        try:
+            while process.poll() is None:
+                now = time.monotonic()
+                downloaded = min(target.stat().st_size, release.archive_size)
+                if downloaded > last_sample_size:
+                    last_progress_at = int(time.time())
+
+                samples.append((now, downloaded))
+                while len(samples) > 2 and now - samples[0][0] > 5:
+                    samples.pop(0)
+                sample_duration = samples[-1][0] - samples[0][0]
+                speed = (
+                    max(0, samples[-1][1] - samples[0][1]) / sample_duration
+                    if sample_duration > 0
+                    else 0
+                )
+                self.status(
+                    job,
+                    "preparing",
+                    "正在从 GitHub Release 下载发布镜像归档。",
+                    phase="download",
+                    downloaded_bytes=downloaded,
+                    total_bytes=release.archive_size,
+                    download_percent=round(downloaded * 100 / release.archive_size, 1),
+                    download_speed_bytes_per_second=round(speed),
+                    download_last_progress_at=last_progress_at,
+                )
+                last_sample_size = downloaded
+                if now >= deadline:
+                    raise subprocess.TimeoutExpired(arguments, 14410)
+                time.sleep(min(1, max(0, deadline - now)))
+
+            _, stderr = process.communicate()
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+            raise
+
+        if process.returncode:
+            if stderr:
+                print(stderr[-3000:], flush=True)
+            raise UpdateError("curl --fail failed")
+
+    def load_release_archive(self, release, job=None):
         """Load a checked GitHub Release asset without private registry credentials."""
         with tempfile.TemporaryDirectory(prefix="download-", dir=self.root) as directory:
             target = Path(directory) / ARCHIVE_NAME
             target.touch(mode=0o600)
-            command("curl", "--fail", "--silent", "--show-error", "--location", "--http1.1",
-                    "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15", "--max-time", "14400",
-                    "--retry", "8", "--retry-all-errors", "--retry-delay", "3", "--retry-max-time", "14400",
-                    "--continue-at", "-",
-                    "--header", "Accept: application/octet-stream",
-                    "--max-filesize", str(release.archive_size), "--output", str(target),
-                    f"https://api.github.com/repos/{self.repository}/releases/assets/{release.archive_id}"
-                    f"?download={int(time.time())}", timeout=14410)
+            curl_args = (
+                "curl", "--fail", "--silent", "--show-error", "--location", "--http1.1",
+                "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15", "--max-time", "14400",
+                "--retry", "8", "--retry-all-errors", "--retry-delay", "3", "--retry-max-time", "14400",
+                "--continue-at", "-",
+                "--header", "Accept: application/octet-stream",
+                "--max-filesize", str(release.archive_size), "--output", str(target),
+                f"https://api.github.com/repos/{self.repository}/releases/assets/{release.archive_id}"
+                f"?download={int(time.time())}",
+            )
+            if job:
+                self._download_release_archive(curl_args, target, release, job)
+                self.status(
+                    job,
+                    "preparing",
+                    "归档下载完成，正在校验文件大小和 SHA-256。",
+                    phase="verify_archive",
+                    downloaded_bytes=target.stat().st_size,
+                    total_bytes=release.archive_size,
+                    download_percent=100.0,
+                    download_speed_bytes_per_second=0,
+                )
+            else:
+                command(*curl_args, timeout=14410)
             digest = hashlib.sha256()
             with target.open("rb") as archive:
                 for chunk in iter(lambda: archive.read(1024 * 1024), b""):
@@ -511,6 +636,17 @@ class Updater:
                 raise UpdateError("Downloaded release archive does not match its SHA-256")
             repository = f"ghcr.io/{self.repository.lower()}"
             tag = f"{repository}:{release.version}"
+            if job:
+                self.status(
+                    job,
+                    "preparing",
+                    "归档校验通过，正在载入 Docker 镜像。",
+                    phase="load_image",
+                    downloaded_bytes=target.stat().st_size,
+                    total_bytes=release.archive_size,
+                    download_percent=100.0,
+                    download_speed_bytes_per_second=0,
+                )
             loaded = command("docker", "load", "--input", str(target), timeout=180)
             if f"Loaded image: {tag}" not in loaded.splitlines():
                 raise UpdateError("Release archive did not load the expected platform image")
@@ -532,10 +668,11 @@ class Updater:
         print(f"Platform {release.version} is running.", flush=True)
 
     def execute(self, job, bootstrap=False):
-        self.status(job, "preparing")
+        self.status(job, "preparing", "正在读取并验证目标发布。", phase="release_metadata")
         release = latest_release(self.repository)
         if not release or release.version != job["version"]:
             raise UpdateError("GitHub latest release changed")
+        self.status(job, "preparing", "正在检查当前平台容器。", phase="inspect_current")
         current = self.inspect(self.app_id())
         old_version = (current["Config"].get("Labels") or {}).get("org.opencontainers.image.version")
         if version_key(old_version):
@@ -543,15 +680,18 @@ class Updater:
                 raise UpdateError("Release is not newer than the currently running version")
         elif not bootstrap:
             raise UpdateError("Existing platform requires a one-time bootstrap")
+        self.status(job, "preparing", "正在核对现有 Compose 配置和数据卷。", phase="check_layout")
         database = self.check_layout(current)
-        image = self.pull_release(release)
+        image = self.pull_release(release, job)
 
+        self.status(job, "preparing", "正在复制数据库并预检迁移。", phase="preflight_snapshot")
         backup = self.root / "backups" / job["id"]
         backup.mkdir(mode=0o700)
         smoke = backup / "preflight"
         smoke.mkdir(mode=0o700)
         try:
             snapshot(database, smoke / "db.sqlite3")
+            self.status(job, "preparing", "正在隔离的数据库副本上运行迁移预检。", phase="preflight_migrations")
             command("docker", "run", "--rm", "--network", "none",
                     "--mount", f"type=bind,src={smoke},dst=/app/data",
                     "-e", "DATABASE_URL=sqlite:////app/data/db.sqlite3",
@@ -564,6 +704,7 @@ class Updater:
         updater_staging = self.root / f"updater-stage-{job['id']}"
         updater_backup = None
         try:
+            self.status(job, "preparing", "正在校验发布镜像内的宿主更新器文件。", phase="stage_updater")
             self.stage_updater_from_image(image, release.version, updater_staging)
             updater_backup = self.backup_updater_files(job["id"])
             previous = f"device-platform-rollback:{job['id']}"
@@ -574,15 +715,18 @@ class Updater:
                            "updater_backup": str(updater_backup), "phase": "switching"}
             save(backup / "transaction.json", transaction)
             save(self.journal, transaction)
-            self.status(job, "switching")
+            self.status(job, "switching", "正在启用维护门并停止旧应用。", phase="stop_old_app")
             self.gate.touch(mode=0o644, exist_ok=True)
             self.gate.chmod(0o644)
             self.compose("stop", "-t", "25", "app")
             snapshot(database, backup / "writing.sqlite3")
             os.replace(backup / "writing.sqlite3", backup / "before.sqlite3")
+            self.status(job, "switching", "数据库切换备份完成，正在启动新版本应用。", phase="start_new_app")
             self.select_image(image)
             self.compose("up", "-d", "--no-deps", "--no-build", "--pull", "never", "app")
+            self.status(job, "switching", "新版本容器已启动，正在等待健康检查。", phase="health_check")
             self.wait_ready(release.version)
+            self.status(job, "switching", "新版本健康检查通过，正在安装随版本发布的更新器。", phase="install_updater")
             self.install_updater_files(updater_staging, updater_backup, release.version)
             # Commit before traffic resumes. Crash recovery must never restore after that point.
             save(self.journal, {**transaction, "phase": "committed"})

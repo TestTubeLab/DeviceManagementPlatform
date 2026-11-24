@@ -18,18 +18,29 @@
       <div v-if="running && info?.job" class="update-progress notice" role="status" aria-live="polite">
         <div class="card-heading">
           <strong>{{ release.unavailable ? '正在重新连接更新状态' : progress.title }}</strong>
-          <el-tag size="small" type="warning">{{ labels[info.job.status] }}</el-tag>
+          <el-tag size="small" type="warning">{{ progress.title }}</el-tag>
         </div>
         <el-steps :active="progress.activeStep" finish-status="success" simple>
-          <el-step title="下载镜像并预检" />
+          <el-step title="下载并校验镜像" />
+          <el-step title="预检数据库迁移" />
           <el-step title="切换并验证" />
         </el-steps>
-        <div class="update-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
-          :aria-valuetext="`${labels[info.job.status]}，${release.unavailable ? '状态暂不可用，正在重试' : progress.detail}`">
+        <div v-if="progress.downloading" class="download-progress" role="group" aria-label="镜像下载进度">
+          <el-progress :percentage="progress.downloadPercent" :stroke-width="9" :format="formatPercent" />
+          <div class="download-metrics">
+            <span><strong>已下载</strong> {{ formatBytes(info.job.downloaded_bytes) }} / {{ formatBytes(info.job.total_bytes) }}</span>
+            <span><strong>速度</strong> {{ formatSpeed(info.job.download_speed_bytes_per_second) }}</span>
+            <span><strong>最近进度</strong> {{ info.job.download_idle_seconds ?? 0 }} 秒前</span>
+          </div>
+          <el-alert v-if="(info.job.download_idle_seconds ?? 0) >= 15" type="warning" :closable="false"
+            :title="`下载文件已 ${info.job.download_idle_seconds} 秒未增长。平台仍在运行；下载器可能正在等待网络或重试，请勿重复提交更新。`" />
+        </div>
+        <div v-else class="update-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+          :aria-valuetext="`${progress.title}，${release.unavailable ? '状态暂不可用，正在重试' : progress.detail}`">
           <span />
         </div>
         <p>{{ release.unavailable ? '暂时无法读取任务状态，页面正在自动重试；更新阶段可能造成短暂不可访问。' : progress.detail }}</p>
-        <small>任务 {{ info.job.id }} · 阶段开始于 {{ formatTime(info.job.updated_at || info.job.created_at) }}</small>
+        <small>任务 {{ info.job.id }} · 阶段开始于 {{ formatTime(info.job.phase_started_at || info.job.updated_at || info.job.created_at) }}</small>
       </div>
       <el-alert v-else-if="info?.job?.status === 'rolled_back'" class="notice" type="warning" :closable="false"
         :title="`${labels[info.job.status]}${info.job.message ? ` · ${info.job.message}` : ''}`" />
@@ -93,25 +104,68 @@ const progress = computed(() => getUpdateProgress(info.value?.job))
 function getUpdateProgress(job?: UpdateJob | null) {
   if (job?.status === 'switching') {
     return {
-      activeStep: 1,
-      title: '正在切换平台服务',
-      detail: '镜像与数据库预检已通过，正在备份数据库、切换应用容器并等待健康检查。此阶段服务可能短暂中断。',
+      activeStep: 2,
+      title: job.message || '正在切换平台服务',
+      detail: job.message || '镜像与数据库预检已通过，正在备份数据库、切换应用容器并等待健康检查。此阶段服务可能短暂中断。',
+      downloading: false,
+      downloadPercent: 0,
     }
   }
   if (job?.status === 'rolling_back') {
     return {
-      activeStep: 1,
-      title: '正在恢复上一版本',
-      detail: '新版本未通过健康检查，正在恢复原应用容器和数据库。请保持页面打开，等待恢复结果。',
+      activeStep: 2,
+      title: job.message || '正在恢复上一版本',
+      detail: job.message || '新版本未通过健康检查，正在恢复原应用容器和数据库。请保持页面打开，等待恢复结果。',
+      downloading: false,
+      downloadPercent: 0,
     }
   }
-  return {
-    activeStep: 0,
-    title: job?.status === 'queued' ? '更新任务已排队' : '正在准备更新',
-    detail: job?.status === 'queued'
-      ? '宿主机更新器即将开始处理。'
-      : '正在下载并校验发布镜像，随后预检数据库迁移。此阶段旧版平台继续运行。',
+  const phaseTitles: Record<string, string> = {
+    release_metadata: '正在检查发布版本',
+    inspect_current: '正在检查当前平台容器',
+    check_layout: '正在检查容器和数据卷',
+    download: '正在下载发布镜像',
+    verify_archive: '正在校验下载文件',
+    load_image: '正在载入 Docker 镜像',
+    verify_image: '正在校验镜像版本',
+    cached_image: '正在复用已校验镜像',
+    registry_pull: '正在从镜像仓库拉取',
+    preflight_snapshot: '正在准备数据库预检',
+    preflight_migrations: '正在预检数据库迁移',
+    stage_updater: '正在校验宿主更新器',
   }
+  const phase = job?.phase || ''
+  const downloading = phase === 'download' && (job?.total_bytes || 0) > 0
+  const downloadedBytes = Math.max(0, job?.downloaded_bytes || 0)
+  const totalBytes = Math.max(0, job?.total_bytes || 0)
+  return {
+    activeStep: phase.startsWith('preflight') || phase === 'stage_updater' ? 1 : 0,
+    title: job?.status === 'queued'
+      ? '更新任务已排队'
+      : phaseTitles[phase] || '正在准备更新',
+    detail: job?.message || (job?.status === 'queued'
+      ? '宿主机更新器即将开始处理。'
+      : '正在准备发布镜像，随后会预检数据库迁移。此阶段旧版平台继续运行。'),
+    downloading,
+    downloadPercent: totalBytes > 0
+      ? Math.min(100, Math.max(0, job?.download_percent ?? downloadedBytes * 100 / totalBytes))
+      : 0,
+  }
+}
+
+function formatBytes(value?: number) {
+  const bytes = Math.max(0, value || 0)
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function formatSpeed(value?: number) {
+  return `${formatBytes(value)}/s`
+}
+
+function formatPercent(value: number) {
+  return `${value.toFixed(1)}%`
 }
 
 const formatTime = (timestamp?: number | null) =>
@@ -147,6 +201,9 @@ async function confirmUpdate() {
 .card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .notice, .release-details { margin-top: 16px; }
 .update-progress { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--el-border-color); border-radius: 4px; }
+.download-progress { display: grid; gap: 10px; }
+.download-metrics { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--el-text-color-regular); }
+.download-metrics strong { color: var(--el-text-color-primary); }
 .update-progress-track { height: 8px; overflow: hidden; background: var(--el-fill-color); border-radius: 4px; }
 .update-progress-track span {
   display: block;

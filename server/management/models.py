@@ -164,6 +164,8 @@ class Device(models.Model):
     frp_enabled = models.BooleanField(default=True, verbose_name='启用FRP')
     frp_ssh_port = models.IntegerField(null=True, blank=True, help_text="分配的SSH端口")
     frp_web_port = models.IntegerField(null=True, blank=True, help_text="分配的Web端口")
+    frp_public_access = models.BooleanField(default=False, verbose_name='允许FRP端口公网直连')
+    frp_stop_requested_at = models.DateTimeField(null=True, blank=True)
     frp_status = models.CharField(
         max_length=20,
         default='disconnected',
@@ -576,6 +578,7 @@ class FrpServerConfig(models.Model):
     # 状态
     is_active = models.BooleanField(default=True)
     config_version = models.IntegerField(default=1, help_text="配置版本号")
+    firewall_revision = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -596,10 +599,10 @@ class FrpServerConfig(models.Model):
         used_ports = set()
 
         # 收集已使用的端口
-        for device in Device.objects.filter(frp_enabled=True):
-            if device.frp_ssh_port:
+        for device in Device.objects.all():
+            if device.frp_ssh_port is not None:
                 used_ports.add(device.frp_ssh_port)
-            if device.frp_web_port:
+            if device.frp_web_port is not None:
                 used_ports.add(device.frp_web_port)
 
         return sorted(all_ports - used_ports)

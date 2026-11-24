@@ -24,3 +24,18 @@ export const syncFrpConfig = () => {
 export const controlFrpService = (action: 'start' | 'stop' | 'restart') => {
   return request.post<any, FrpOverview>('/frp/service/', { action })
 }
+
+export const setFrpPublicAccess = (deviceId: string, enabled: boolean) =>
+  request.patch<any, { message: string; firewall: FrpOverview['firewall'] }>(
+    `/frp/${deviceId}/public-access/`, { enabled },
+  )
+
+export const updateFrpPort = (deviceId: string, field: 'ssh_port' | 'web_port', port: number) =>
+  request.patch<any, { message: string; firewall: FrpOverview['firewall'] }>(
+    `/frp/${deviceId}/ports/`, { [field]: port },
+  )
+
+export const resetFrpPorts = (deviceId: string) =>
+  request.post<any, { message: string; ssh_port: number; web_port: number; firewall: FrpOverview['firewall'] }>(
+    `/frp/${deviceId}/ports/reset/`,
+  )

@@ -1,6 +1,7 @@
 import base64
 import hashlib
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
@@ -228,7 +229,10 @@ class DeviceSshTests(APITestCase):
             self.assertEqual(self.create(payload).status_code, 400)
         self.assertFalse(DeviceSshTask.objects.exists())
 
-    def test_confirmation_requires_device_evidence(self):
+    @patch('management.views.is_frp_firewall_policy_applied', return_value=True)
+    def test_confirmation_requires_device_evidence(self, _mock_firewall_applied):
+        self.device.frp_web_port = 11259
+        self.device.save(update_fields=['frp_web_port'])
         fingerprint = 'SHA256:' + 'a' * 43
         self.poll({**STATE, 'mode': 'pending', 'pending_fingerprint': fingerprint})
         self.client.force_authenticate(self.admin)

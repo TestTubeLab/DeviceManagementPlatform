@@ -11,6 +11,7 @@ from io import StringIO
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.http import HttpResponse
 from django.contrib.auth import authenticate
@@ -19,7 +20,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.authtoken.models import Token
 from .log_queries import LogPagination, SystemLogSerializer, filter_logs
 from .log_tasks import (
@@ -31,6 +32,7 @@ from .models import (
     CodePackage, Project, ProjectConfig, ProjectDeployment, FrpServerConfig, SystemLog
 )
 from .models import DeviceSshManagement
+from .frp_firewall import firewall_status, publish_frp_firewall_policy, reassignable_after_stop, update_directory
 from .serializers import (
     DeviceSerializer, DeploymentTaskSerializer,
     UpdateTaskSerializer, DeviceLogSerializer, DockerImageSerializer,
@@ -190,14 +192,14 @@ def validate_frp_range(start_port, end_port):
 
 def get_used_frp_ports(exclude_device=None):
     """获取已使用的 FRP 端口（SSH 与 Web 共用同一个端口池）。"""
-    queryset = Device.objects.filter(frp_enabled=True)
+    queryset = Device.objects.all()
     if exclude_device is not None:
         queryset = queryset.exclude(pk=exclude_device.pk)
     used_ports = set()
     for ssh_port, web_port in queryset.values_list('frp_ssh_port', 'frp_web_port'):
-        if ssh_port:
+        if ssh_port is not None:
             used_ports.add(ssh_port)
-        if web_port:
+        if web_port is not None:
             used_ports.add(web_port)
     return used_ports
 
@@ -213,14 +215,15 @@ def is_valid_frp_port_pair(device, frp_config):
     )
 
 
-def release_device_frp_ports(device, save=True):
-    """释放设备的 FRP 端口。"""
-    device.frp_ssh_port = None
-    device.frp_web_port = None
-    device.frp_status = 'disconnected'
-    device.frp_error_message = ''
-    if save:
-        device.save(update_fields=['frp_ssh_port', 'frp_web_port', 'frp_status', 'frp_error_message'])
+def advance_frp_firewall_revision(frp_config):
+    """Publish a new host firewall snapshot after a persisted FRP allocation change."""
+    frp_config.firewall_revision += 1
+    frp_config.save(update_fields=['firewall_revision'])
+    return publish_frp_firewall_policy(frp_config)
+
+
+def is_frp_firewall_policy_applied(frp_config):
+    return firewall_status(update_directory(), frp_config.firewall_revision)['policy_applied']
 
 
 def requires_trusted_agent_upgrade(device):
@@ -269,6 +272,8 @@ def allocate_frp_ssh_port(device, frp_config=None):
 
     if is_valid_frp_port_pair(device, frp_config):
         return device.frp_ssh_port
+    if device.frp_ssh_port is not None or device.frp_web_port is not None:
+        return None
 
     if not frp_config.is_active:
         return None
@@ -289,30 +294,32 @@ def allocate_frp_ssh_port(device, frp_config=None):
 
 
 def plan_frp_port_assignments(frp_config):
-    """根据当前端口池为启用 FRP 的设备规划 SSH/Web 相邻端口对。"""
+    """Keep every stored pair fixed; allocate only for enabled devices without a pair."""
     validate_frp_range(frp_config.port_pool_start, frp_config.port_pool_end)
 
-    enabled_devices = list(Device.objects.filter(frp_enabled=True).order_by('created_at', 'id'))
+    devices = list(Device.objects.order_by('created_at', 'id'))
     used_ports = set()
     assignments = {}
     pending_devices = []
 
-    for device in enabled_devices:
+    for device in devices:
         current_port = device.frp_ssh_port
         current_web_port = device.frp_web_port
-        if (
-            current_port
-            and current_web_port == current_port + 1
-            and frp_config.port_pool_start <= current_port
-            and current_web_port <= frp_config.port_pool_end
-            and current_port not in used_ports
-            and current_web_port not in used_ports
-        ):
+        if current_port is None and current_web_port is None:
+            if device.frp_enabled:
+                pending_devices.append(device)
+            continue
+        if (current_port is None or current_web_port is None or current_web_port != current_port + 1
+                or not frp_config.port_pool_start <= current_port < current_web_port <= frp_config.port_pool_end):
+            raise ValidationError({
+                'port_pool_start': f'设备 {device.device_id} 已保留的端口对不在新端口池中，请先停用并重置该设备端口',
+            })
+        if current_port in used_ports or current_web_port in used_ports:
+            raise ValidationError({'port_pool_start': f'设备 {device.device_id} 的 FRP 端口与其他设备冲突'})
+        else:
             assignments[device.pk] = (current_port, current_web_port)
             used_ports.add(current_port)
             used_ports.add(current_web_port)
-        else:
-            pending_devices.append(device)
 
     next_port = frp_config.port_pool_start
     for device in pending_devices:
@@ -324,7 +331,7 @@ def plan_frp_port_assignments(frp_config):
 
         if next_port + 1 > frp_config.port_pool_end:
             raise ValidationError({
-                'port_pool_end': f'端口池容量不足，当前启用 FRP 的设备数为 {len(enabled_devices)}，每台设备需要 2 个相邻端口'
+                'port_pool_end': f'端口池容量不足，当前待分配设备数为 {len(pending_devices)}，每台设备需要 2 个相邻端口'
             })
 
         assignments[device.pk] = (next_port, next_port + 1)
@@ -336,14 +343,10 @@ def plan_frp_port_assignments(frp_config):
 
 
 def apply_frp_port_assignments(frp_config, assignments=None):
-    """应用 FRP 端口规划，同时清理已禁用设备的旧端口。"""
+    """Persist planned pairs without releasing reservations when FRP is switched off."""
     assignments = assignments or plan_frp_port_assignments(frp_config)
 
-    for device in Device.objects.filter(frp_enabled=False):
-        if device.frp_ssh_port or device.frp_web_port:
-            release_device_frp_ports(device)
-
-    for device in Device.objects.filter(frp_enabled=True):
+    for device in Device.objects.all():
         expected_pair = assignments.get(device.pk)
         if expected_pair is None:
             continue
@@ -379,10 +382,18 @@ def build_frp_config_for_device(device, frp_config=None):
         return None
 
     if not is_valid_frp_port_pair(device, frp_config):
-        allocate_frp_ssh_port(device, frp_config=frp_config)
+        if not firewall_status(update_directory(), frp_config.firewall_revision)['controller_ready']:
+            return None
+        if not allocate_frp_ssh_port(device, frp_config=frp_config):
+            return None
+        frp_config.config_version += 1
+        frp_config.save(update_fields=['config_version'])
+        advance_frp_firewall_revision(frp_config)
         device.refresh_from_db(fields=['frp_ssh_port', 'frp_web_port', 'frp_status', 'frp_error_message'])
 
     if not is_valid_frp_port_pair(device, frp_config):
+        return None
+    if not is_frp_firewall_policy_applied(frp_config):
         return None
 
     # 已确认的远程策略不随管理入口停用、凭据撤销或旧 Agent 请求而放宽。
@@ -760,7 +771,16 @@ class DeviceViewSet(viewsets.ModelViewSet):
             response_data['frp_disable_required'] = True
         elif device.frp_enabled:
             if not is_valid_frp_port_pair(device, frp_cfg):
-                frp_pair_repaired = bool(allocate_frp_ssh_port(device, frp_config=frp_cfg))
+                controller_ready = firewall_status(
+                    update_directory(), frp_cfg.firewall_revision,
+                )['controller_ready']
+                frp_pair_repaired = bool(
+                    controller_ready and allocate_frp_ssh_port(device, frp_config=frp_cfg)
+                )
+                if frp_pair_repaired:
+                    frp_cfg.config_version += 1
+                    frp_cfg.save(update_fields=['config_version'])
+                    advance_frp_firewall_revision(frp_cfg)
 
         if is_frp_enabled_for_device(device, frp_cfg):
             server_frp_version = frp_cfg.config_version
@@ -1419,58 +1439,68 @@ class DeviceViewSet(viewsets.ModelViewSet):
             enabled = bool(enabled)
 
         frp_cfg = get_frp_config()
+        if bool(enabled) != device.frp_enabled and enabled and frp_cfg.is_active:
+            if not firewall_status(update_directory(), frp_cfg.firewall_revision)['controller_ready']:
+                return Response(
+                    {'error': '宿主防火墙控制器未就绪，暂不能安全修改 FRP 端口策略'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
 
-        if enabled and not device.frp_enabled:
-            device.frp_enabled = True
-            device.save(update_fields=['frp_enabled'])
+        with transaction.atomic():
+            frp_cfg = FrpServerConfig.objects.select_for_update().get(pk=frp_cfg.pk)
+            device = Device.objects.select_for_update().get(pk=device.pk)
+            was_enabled = device.frp_enabled
+            changed = bool(enabled) != was_enabled
+            old_pair = (device.frp_ssh_port, device.frp_web_port)
+            old_public_access = device.frp_public_access
+            fields = []
+            if enabled:
+                device.frp_enabled = True
+                device.frp_stop_requested_at = None
+                fields.extend(['frp_enabled', 'frp_stop_requested_at'])
+                if not was_enabled:
+                    device.frp_public_access = False
+                    fields.append('frp_public_access')
+                if frp_cfg.is_active and not is_valid_frp_port_pair(device, frp_cfg):
+                    if not allocate_frp_ssh_port(device, frp_config=frp_cfg):
+                        return Response({'error': '端口池已耗尽，无法为该设备分配 SSH/Web 相邻端口'}, status=400)
+                if not was_enabled:
+                    frp_cfg.config_version += 1
+                    frp_cfg.save(update_fields=['config_version'])
+                message = '设备 FRP 已启用，端口策略正在同步'
+            elif was_enabled or device.frp_public_access:
+                device.frp_enabled = False
+                device.frp_public_access = False
+                device.frp_stop_requested_at = timezone.now()
+                fields.extend(['frp_enabled', 'frp_public_access', 'frp_stop_requested_at'])
+                frp_cfg.config_version += 1
+                frp_cfg.save(update_fields=['config_version'])
+                mark_device_pending_agent_update(device)
+                message = '设备 FRP 已停用；SSH/Web 端口保留，等待设备确认隧道断开'
+            else:
+                message = '设备 FRP 状态未变化'
 
-            if frp_cfg.is_active:
-                port = allocate_frp_ssh_port(device, frp_config=frp_cfg)
-                if not port:
-                    device.frp_enabled = False
-                    device.save(update_fields=['frp_enabled'])
-                    return Response({'error': '端口池已耗尽，无法启用该设备的 FRP'}, status=status.HTTP_400_BAD_REQUEST)
+            if fields:
+                device.save(update_fields=list(dict.fromkeys(fields)))
+            pair_changed = old_pair != (device.frp_ssh_port, device.frp_web_port)
+            policy_changed = changed or pair_changed or old_public_access != device.frp_public_access
+            if pair_changed and changed is False:
+                frp_cfg.config_version += 1
+                frp_cfg.save(update_fields=['config_version'])
+            if policy_changed:
+                frp_cfg.firewall_revision += 1
+                frp_cfg.save(update_fields=['firewall_revision'])
 
-                return Response({
-                    'message': '设备 FRP 已启用',
-                    'frp_enabled': True,
-                    'ssh_port': port,
-                    'web_port': device.frp_web_port,
-                    'ssh_command': device.ssh_connection_string,
-                    'web_url': device.web_access_url,
-                })
-
-            return Response({
-                'message': '设备 FRP 已启用，待平台侧 FRP 服务启用后会自动分配并下发配置',
-                'frp_enabled': True,
-                'ssh_port': device.frp_ssh_port,
-                'web_port': device.frp_web_port,
-                'ssh_command': device.ssh_connection_string,
-                'web_url': device.web_access_url,
-            })
-
-        if not enabled and device.frp_enabled:
-            device.frp_enabled = False
-            release_device_frp_ports(device, save=False)
-            device.save(update_fields=['frp_enabled', 'frp_ssh_port', 'frp_web_port', 'frp_status', 'frp_error_message'])
-            mark_device_pending_agent_update(device)
-
-            return Response({
-                'message': '设备 FRP 已禁用，在线设备会在下次心跳时停用本地 frpc',
-                'frp_enabled': False,
-            })
-
-        if enabled and device.frp_enabled and frp_cfg.is_active and not is_valid_frp_port_pair(device, frp_cfg):
-            if not allocate_frp_ssh_port(device, frp_config=frp_cfg):
-                return Response({'error': '端口池已耗尽，无法为该设备分配 SSH/Web 相邻端口'}, status=status.HTTP_400_BAD_REQUEST)
-
+        firewall = publish_frp_firewall_policy(frp_cfg)
+        device.refresh_from_db()
         return Response({
-            'message': '设备 FRP 状态未变化',
+            'message': message,
             'frp_enabled': device.frp_enabled,
             'ssh_port': device.frp_ssh_port,
             'web_port': device.frp_web_port,
             'ssh_command': device.ssh_connection_string,
             'web_url': device.web_access_url,
+            'firewall': firewall,
         })
 
     @action(detail=True, methods=['post'])
@@ -1480,9 +1510,6 @@ class DeviceViewSet(viewsets.ModelViewSet):
         POST /api/devices/{device_id}/allocate_frp_ports/
         """
         device = self.get_object()
-
-        if not device.frp_enabled:
-            return Response({'error': '该设备已禁用 FRP，请先启用后再分配端口'}, status=status.HTTP_400_BAD_REQUEST)
 
         frp_cfg = get_frp_config()
 
@@ -1497,9 +1524,19 @@ class DeviceViewSet(viewsets.ModelViewSet):
             })
 
         # 分配端口
+        if not device.frp_enabled:
+            return Response({'error': '该设备已禁用 FRP；已保留的端口可直接复用，无需重新分配'}, status=400)
+
+        if not firewall_status(update_directory(), frp_cfg.firewall_revision)['controller_ready']:
+            return Response({'error': '宿主防火墙控制器未就绪，暂不能分配新 FRP 端口'}, status=503)
+
         port = allocate_frp_ssh_port(device, frp_config=frp_cfg)
         if not port:
             return Response({'error': '端口池已耗尽或 FRP 未启用，每台设备需要 2 个相邻端口'}, status=status.HTTP_400_BAD_REQUEST)
+
+        frp_cfg.config_version += 1
+        frp_cfg.save(update_fields=['config_version'])
+        firewall = advance_frp_firewall_revision(frp_cfg)
 
         return Response({
             'message': '端口分配成功',
@@ -1507,6 +1544,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
             'web_port': device.frp_web_port,
             'ssh_command': device.ssh_connection_string or f"ssh -p {port} jetson@{frp_cfg.server_addr}",
             'web_url': device.web_access_url or f"http://{frp_cfg.server_addr}:{device.frp_web_port}",
+            'firewall': firewall,
         })
 
     @action(detail=True, methods=['get'], permission_classes=[AllowAny])
@@ -1538,15 +1576,12 @@ class DeviceViewSet(viewsets.ModelViewSet):
         """
         device = self.get_object()
 
-        frp_status = request.data.get('status')
-        error_message = request.data.get('error_message', '')
-
-        if should_disable_frp_for_device(device):
-            device.frp_status = 'disconnected'
-            device.frp_error_message = ''
-        else:
-            device.frp_status = frp_status
-            device.frp_error_message = error_message
+        frp_status = serializers.ChoiceField(choices=['disconnected', 'connecting', 'connected', 'error']).run_validation(
+            request.data.get('status')
+        )
+        error_message = normalize_text(request.data.get('error_message', ''))[:2000]
+        device.frp_status = frp_status
+        device.frp_error_message = error_message if frp_status == 'error' else ''
         device.frp_last_check = timezone.now()
         device.save()
 
@@ -1645,8 +1680,14 @@ class FrpManagementViewSet(viewsets.ViewSet):
     """FRP 全局管理 API。"""
     permission_classes = [IsAuthenticated]
 
+    def get_permissions(self):
+        if self.action in {'set_public_access', 'edit_ports', 'reset_ports'}:
+            return [IsAdminUser()]
+        return super().get_permissions()
+
     def _build_overview(self):
         frp_config = get_frp_config()
+        firewall = publish_frp_firewall_policy(frp_config)
         config_data = FrpServerConfigSerializer(frp_config).data
         service = get_frps_service_snapshot()
         devices = FrpDeviceSerializer(
@@ -1657,11 +1698,117 @@ class FrpManagementViewSet(viewsets.ViewSet):
             'config': config_data,
             'service': service,
             'devices': devices,
+            'firewall': firewall,
         }
 
     def list(self, request):
         """获取 FRP 配置总览。"""
         return Response(self._build_overview())
+
+    @action(detail=True, methods=['patch'], url_path='public-access')
+    def set_public_access(self, request, pk=None):
+        """Set direct public access for exactly one device's assigned SSH/Web ports."""
+        enabled = request.data.get('enabled')
+        if type(enabled) is not bool:
+            return Response({'error': 'enabled 必须为布尔值'}, status=status.HTTP_400_BAD_REQUEST)
+
+        frp_config = get_frp_config()
+        device = get_object_or_404(Device, device_id=pk)
+        if enabled and (not device.frp_enabled or not frp_config.is_active):
+            return Response({'error': '请先启用设备和平台 FRP'}, status=status.HTTP_409_CONFLICT)
+        if enabled and not firewall_status(update_directory(), frp_config.firewall_revision)['controller_ready']:
+            return Response({'error': '宿主防火墙控制器未就绪，无法确认公网规则已生效'}, status=503)
+        if enabled and not is_valid_frp_port_pair(device, frp_config):
+            return Response({'error': '设备尚未分配有效的 SSH/Web 端口对'}, status=409)
+
+        with transaction.atomic():
+            frp_config = FrpServerConfig.objects.select_for_update().get(pk=frp_config.pk)
+            device = Device.objects.select_for_update().get(pk=device.pk)
+            changed = device.frp_public_access != enabled
+            if changed:
+                device.frp_public_access = enabled
+                device.save(update_fields=['frp_public_access'])
+                frp_config.firewall_revision += 1
+                frp_config.save(update_fields=['firewall_revision'])
+
+        firewall = publish_frp_firewall_policy(frp_config)
+        return Response({
+            'message': '公网直连策略正在同步' if changed else '公网直连策略未变化',
+            'frp_public_access': device.frp_public_access,
+            'firewall': firewall,
+        }, status=status.HTTP_202_ACCEPTED if changed and not firewall['policy_applied'] else status.HTTP_200_OK)
+
+    @action(detail=True, methods=['patch'], url_path='ports')
+    def edit_ports(self, request, pk=None):
+        """Move an inactive device's adjacent SSH/Web port pair to a chosen start or end."""
+        if set(request.data) not in ({'ssh_port'}, {'web_port'}):
+            return Response({'error': '双击 SSH 或 Web 端口后，每次只能修改一个端口'}, status=400)
+        field = next(iter(request.data))
+        selected_port = serializers.IntegerField(min_value=1, max_value=65535).run_validation(request.data[field])
+        frp_config = get_frp_config()
+        device = get_object_or_404(Device, device_id=pk)
+        if not firewall_status(update_directory(), frp_config.firewall_revision)['controller_ready']:
+            return Response({'error': '宿主防火墙控制器未就绪，暂不能安全修改端口映射'}, status=503)
+
+        with transaction.atomic():
+            frp_config = FrpServerConfig.objects.select_for_update().get(pk=frp_config.pk)
+            device = Device.objects.select_for_update().get(pk=device.pk)
+            if not reassignable_after_stop(device):
+                return Response({'error': '请先停用 FRP，并等待设备回报隧道已断开后再修改端口'}, status=409)
+            ssh_port = selected_port if field == 'ssh_port' else selected_port - 1
+            web_port = ssh_port + 1
+            if not frp_config.port_pool_start <= ssh_port < web_port <= frp_config.port_pool_end:
+                return Response({'error': 'SSH/Web 端口必须在端口池内且保持相邻'}, status=400)
+            occupied = get_used_frp_ports(exclude_device=device)
+            if ssh_port in occupied or web_port in occupied:
+                return Response({'error': '该端口对已被其他设备保留'}, status=409)
+            device.frp_ssh_port = ssh_port
+            device.frp_web_port = web_port
+            device.frp_public_access = False
+            device.frp_error_message = ''
+            device.save(update_fields=['frp_ssh_port', 'frp_web_port', 'frp_public_access', 'frp_error_message'])
+            frp_config.config_version += 1
+            frp_config.firewall_revision += 1
+            frp_config.save(update_fields=['config_version', 'firewall_revision'])
+
+        firewall = publish_frp_firewall_policy(frp_config)
+        return Response({'message': 'SSH/Web 端口对已修改，防火墙策略正在同步', 'firewall': firewall})
+
+    @action(detail=True, methods=['post'], url_path='ports/reset')
+    def reset_ports(self, request, pk=None):
+        """Move an inactive device to the next free adjacent port pair."""
+        frp_config = get_frp_config()
+        device = get_object_or_404(Device, device_id=pk)
+        if not firewall_status(update_directory(), frp_config.firewall_revision)['controller_ready']:
+            return Response({'error': '宿主防火墙控制器未就绪，暂不能安全重置端口映射'}, status=503)
+        with transaction.atomic():
+            frp_config = FrpServerConfig.objects.select_for_update().get(pk=frp_config.pk)
+            device = Device.objects.select_for_update().get(pk=device.pk)
+            if not reassignable_after_stop(device):
+                return Response({'error': '请先停用 FRP，并等待设备回报隧道已断开后再重置端口'}, status=409)
+            occupied = get_used_frp_ports(exclude_device=device)
+            current_pair = (device.frp_ssh_port, device.frp_web_port)
+            pair = next((
+                (port, port + 1)
+                for port in range(frp_config.port_pool_start, frp_config.port_pool_end)
+                if port not in occupied and port + 1 not in occupied
+                and (current_pair == (None, None) or (port, port + 1) != current_pair)
+            ), None)
+            if pair is None:
+                return Response({'error': '没有可用的其他 SSH/Web 相邻端口对'}, status=409)
+            device.frp_ssh_port, device.frp_web_port = pair
+            device.frp_public_access = False
+            device.frp_error_message = ''
+            device.save(update_fields=['frp_ssh_port', 'frp_web_port', 'frp_public_access', 'frp_error_message'])
+            frp_config.config_version += 1
+            frp_config.firewall_revision += 1
+            frp_config.save(update_fields=['config_version', 'firewall_revision'])
+
+        firewall = publish_frp_firewall_policy(frp_config)
+        return Response({
+            'message': f'端口已重置为 SSH {pair[0]} / Web {pair[1]}，防火墙策略正在同步',
+            'ssh_port': pair[0], 'web_port': pair[1], 'firewall': firewall,
+        })
 
     @action(detail=False, methods=['patch'], url_path='config')
     def update_config(self, request):
@@ -1690,6 +1837,7 @@ class FrpManagementViewSet(viewsets.ViewSet):
             'port_pool_end': frp_config.port_pool_end,
             'is_active': frp_config.is_active,
             'config_version': frp_config.config_version,
+            'firewall_revision': frp_config.firewall_revision,
             'description': frp_config.description,
         }
         old_device_state = {
@@ -1698,6 +1846,8 @@ class FrpManagementViewSet(viewsets.ViewSet):
                 'frp_web_port': device.frp_web_port,
                 'frp_status': device.frp_status,
                 'frp_error_message': device.frp_error_message,
+                'frp_public_access': device.frp_public_access,
+                'frp_stop_requested_at': device.frp_stop_requested_at,
                 'config': json.loads(json.dumps(device.config or {})),
             }
             for device in Device.objects.all()
@@ -1709,15 +1859,27 @@ class FrpManagementViewSet(viewsets.ViewSet):
         assignments = plan_frp_port_assignments(frp_config)
 
         config_changed = any(candidate[key] != old_config_state[key] for key in candidate)
-        if config_changed:
-            frp_config.config_version = old_config_state['config_version'] + 1
 
         try:
             with transaction.atomic():
+                if config_changed:
+                    frp_config.config_version = old_config_state['config_version'] + 1
+                assignments_changed = any(
+                    (old_device_state[device_id]['frp_ssh_port'], old_device_state[device_id]['frp_web_port'])
+                    != assignments.get(device_id, (None, None))
+                    for device_id in assignments
+                )
+                if assignments_changed and not config_changed:
+                    frp_config.config_version = old_config_state['config_version'] + 1
+                if config_changed or assignments_changed:
+                    frp_config.firewall_revision = old_config_state['firewall_revision'] + 1
                 frp_config.save()
                 apply_frp_port_assignments(frp_config, assignments=assignments)
                 if not frp_config.is_active:
                     for device in Device.objects.filter(frp_enabled=True):
+                        device.frp_public_access = False
+                        device.frp_stop_requested_at = timezone.now()
+                        device.save(update_fields=['frp_public_access', 'frp_stop_requested_at'])
                         mark_device_pending_agent_update(device)
 
             sync_result = sync_frps_service_config(frp_config, restart_if_running=True)
@@ -1733,8 +1895,15 @@ class FrpManagementViewSet(viewsets.ViewSet):
                     device.frp_web_port = original['frp_web_port']
                     device.frp_status = original['frp_status']
                     device.frp_error_message = original['frp_error_message']
+                    device.frp_public_access = original['frp_public_access']
+                    device.frp_stop_requested_at = original['frp_stop_requested_at']
                     device.config = original['config']
-                    device.save(update_fields=['frp_ssh_port', 'frp_web_port', 'frp_status', 'frp_error_message', 'config'])
+                    device.save(update_fields=[
+                        'frp_ssh_port', 'frp_web_port', 'frp_status', 'frp_error_message',
+                        'frp_public_access', 'frp_stop_requested_at', 'config',
+                    ])
+
+            publish_frp_firewall_policy(frp_config)
 
             raise ValidationError({'error': f'FRP 配置保存失败: {exc}'})
 
@@ -1808,9 +1977,10 @@ def agent_download(request):
     """
     agent_path = os.path.join(settings.BASE_DIR, 'device-agent', 'device-agent.py')
     
-    # 如果本地没有，尝试从 device-agent 目录读取
+    # Support both the container layout and running Django from the source checkout.
     if not os.path.exists(agent_path):
-        # Docker 部署时的路径
+        agent_path = os.path.join(settings.BASE_DIR, '..', 'device-agent', 'device-agent.py')
+    if not os.path.exists(agent_path):
         agent_path = '/app/device-agent/device-agent.py'
     
     if os.path.exists(agent_path):

@@ -9,6 +9,7 @@ from .models import (
     CodePackage, Project, ProjectConfig, ProjectDeployment, DeviceConfigHistory,
     FrpServerConfig
 )
+from .frp_firewall import reassignable_after_stop
 
 
 class DeviceSerializer(serializers.ModelSerializer):
@@ -30,7 +31,11 @@ class DeviceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Device
         fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at', 'last_heartbeat', 'hardware_fingerprint']
+        read_only_fields = [
+            'created_at', 'updated_at', 'last_heartbeat', 'hardware_fingerprint',
+            'frp_enabled', 'frp_ssh_port', 'frp_web_port', 'frp_public_access',
+            'frp_status', 'frp_last_check', 'frp_stop_requested_at', 'frp_error_message',
+        ]
 
     def get_is_online(self, obj):
         """动态计算是否在线（2分钟内有心跳）"""
@@ -65,13 +70,15 @@ class FrpDeviceSerializer(serializers.ModelSerializer):
     agent_version = serializers.SerializerMethodField()
     ssh_connection_string = serializers.SerializerMethodField()
     web_access_url = serializers.SerializerMethodField()
+    can_reassign_ports = serializers.SerializerMethodField()
 
     class Meta:
         model = Device
         fields = [
             'id', 'device_id', 'name', 'ip_address',
             'status', 'computed_status', 'last_heartbeat', 'agent_version',
-            'frp_enabled', 'frp_ssh_port', 'frp_web_port', 'frp_status',
+            'frp_enabled', 'frp_ssh_port', 'frp_web_port', 'frp_public_access',
+            'frp_status', 'frp_last_check', 'frp_stop_requested_at', 'can_reassign_ports',
             'ssh_connection_string', 'web_access_url',
         ]
 
@@ -88,6 +95,9 @@ class FrpDeviceSerializer(serializers.ModelSerializer):
 
     def get_web_access_url(self, obj):
         return obj.web_access_url
+
+    def get_can_reassign_ports(self, obj):
+        return reassignable_after_stop(obj)
 
 
 class DeploymentTaskSerializer(serializers.ModelSerializer):
@@ -353,11 +363,12 @@ class FrpServerConfigSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'server_addr', 'server_port', 'token',
             'port_pool_start', 'port_pool_end', 'is_active', 'config_version',
+            'firewall_revision',
             'description', 'created_at', 'updated_at', 'available_ports',
             'total_ports', 'used_ports_count', 'available_ports_count',
             'enabled_devices_count', 'connected_devices_count'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'config_version']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'config_version', 'firewall_revision']
 
     def get_available_ports(self, obj):
         """获取可用端口列表"""

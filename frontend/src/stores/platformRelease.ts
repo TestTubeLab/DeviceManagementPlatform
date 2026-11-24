@@ -8,6 +8,14 @@ export interface UpdateJob {
   status: 'queued' | 'preparing' | 'switching' | 'rolling_back' | 'succeeded' | 'failed' | 'rolled_back' | 'recovery_required'
   created_at: number
   updated_at?: number
+  phase?: string | null
+  phase_started_at?: number
+  downloaded_bytes?: number
+  total_bytes?: number
+  download_percent?: number
+  download_speed_bytes_per_second?: number
+  download_last_progress_at?: number
+  download_idle_seconds?: number
   actor: string
   message?: string
 }

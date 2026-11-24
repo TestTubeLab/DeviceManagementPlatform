@@ -47,6 +47,10 @@ def update_job(directory):
     pending = read_state(directory, "request.json")
     if pending and pending.get("id") != status.get("id"):
         return {**pending, "status": "queued"}
+    if status.get("phase") == "download":
+        last_progress = status.get("download_last_progress_at")
+        if isinstance(last_progress, (int, float)):
+            status["download_idle_seconds"] = max(0, int(time.time() - last_progress))
     return status or None
 
 

@@ -14,12 +14,15 @@ cd /app
 echo "[1/4] 数据库迁移..."
 python manage.py migrate --noinput
 
+echo "[2/5] 同步 FRP 防火墙端口策略..."
+python manage.py sync_frp_firewall_policy
+
 # 收集静态文件
-echo "[2/4] 收集静态文件..."
+echo "[3/5] 收集静态文件..."
 python manage.py collectstatic --noinput
 
 # 创建超级用户（如果不存在）
-echo "[3/4] 检查管理员账户..."
+echo "[4/5] 检查管理员账户..."
 if [[ "${DEVICE_SSH_BUILTIN_TLS:-0}" == 1 ]]; then
     # 开启管理入口前，确认没有沿用旧版的已知默认管理员密码。
     python manage.py shell -c "
@@ -43,7 +46,7 @@ else:
 fi
 
 # 启动服务
-echo "[4/4] 启动服务..."
+echo "[5/5] 启动服务..."
 echo ""
 echo "=========================================="
 echo "平台启动成功!"

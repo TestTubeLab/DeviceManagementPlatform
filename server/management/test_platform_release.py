@@ -89,3 +89,47 @@ class PlatformUpdateApiTests(APITestCase):
     def test_readiness_checks_django_and_returns_running_version(self):
         response = self.client.get("/api/platform/health/")
         self.assertEqual(response.json(), {"status": "ok", "version": "v1.7.3"})
+
+    def test_release_status_exposes_live_download_metrics_to_staff(self):
+        last_progress_at = int(time.time()) - 27
+        (self.shared / "status.json").write_text(json.dumps({
+            "id": "a" * 32,
+            "version": "v1.8.0",
+            "actor": "operator",
+            "created_at": last_progress_at - 60,
+            "updated_at": last_progress_at,
+            "phase_started_at": last_progress_at - 50,
+            "status": "preparing",
+            "phase": "download",
+            "downloaded_bytes": 5_000_000,
+            "total_bytes": 10_000_000,
+            "download_percent": 50.0,
+            "download_speed_bytes_per_second": 128_000,
+            "download_last_progress_at": last_progress_at,
+        }))
+        self.client.force_authenticate(self.staff)
+
+        with (
+            patch("management.platform_updates.latest_release", return_value=self.release),
+            patch("management.platform_updates.time.time", return_value=last_progress_at + 27),
+        ):
+            response = self.client.get("/api/platform/release/")
+
+        self.assertEqual(response.status_code, 200)
+        job = response.data["job"]
+        self.assertEqual(job["phase"], "download")
+        self.assertEqual(job["downloaded_bytes"], 5_000_000)
+        self.assertEqual(job["total_bytes"], 10_000_000)
+        self.assertEqual(job["download_percent"], 50.0)
+        self.assertEqual(job["download_speed_bytes_per_second"], 128_000)
+        self.assertEqual(job["download_idle_seconds"], 27)
+
+    def test_queued_job_does_not_report_download_idle_time(self):
+        enqueue_update(self.shared, "v1.8.0", "operator")
+        self.client.force_authenticate(self.staff)
+
+        with patch("management.platform_updates.latest_release", return_value=self.release):
+            response = self.client.get("/api/platform/release/")
+
+        self.assertEqual(response.data["job"]["status"], "queued")
+        self.assertNotIn("download_idle_seconds", response.data["job"])
